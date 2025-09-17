@@ -194,7 +194,7 @@ jobs:
     steps:
       -
         name: Download metadata
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v5
         with:
           name: metadata-static-builder
           path: /tmp/metadata
