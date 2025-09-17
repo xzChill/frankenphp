@@ -48,7 +48,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       -
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ steps.check.outputs.ref }}
       -
@@ -94,7 +94,7 @@ jobs:
     needs: [ prepare ]
     steps:
       -
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.ref }}
       -
@@ -251,7 +251,7 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: 1
     steps:
       -
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.ref }}
       -
