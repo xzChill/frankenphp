@@ -153,7 +153,7 @@ jobs:
       -
         name: Build
         id: build
-        uses: docker/bake-action@v4
+        uses: docker/bake-action@v6
         with:
           pull: true
           load: ${{ !fromJson(needs.prepare.outputs.push) }}
