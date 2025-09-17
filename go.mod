@@ -7,7 +7,7 @@ go 1.21
 retract v1.0.0-rc.1 // Human error
 
 require (
-	github.com/maypok86/otter v1.2.1
+	github.com/maypok86/otter v1.2.4
 	github.com/stretchr/testify v1.9.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/net v0.25.0
