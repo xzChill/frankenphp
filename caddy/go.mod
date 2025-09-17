@@ -16,7 +16,7 @@ require (
 	github.com/dunglas/mercure/caddy v0.15.11
 	github.com/dunglas/vulcain/caddy v1.0.2
 	github.com/spf13/cobra v1.8.0
-	go.uber.org/automaxprocs v1.5.3
+	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/zap v1.27.0
 )
 
