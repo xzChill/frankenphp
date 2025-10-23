@@ -740,7 +740,9 @@ static void set_thread_name_windows(const char *thread_name) {
     }
   }
   
-  /* Fallback: Use the older exception-based method for older Windows versions */
+#ifdef _MSC_VER
+  /* Fallback for MSVC: Use the older exception-based method for older Windows versions */
+  /* Note: This only works with Microsoft Visual C++ compiler, not MinGW/GCC */
   #pragma pack(push,8)
   typedef struct tagTHREADNAME_INFO {
     DWORD dwType;     /* Must be 0x1000 */
@@ -764,6 +766,11 @@ static void set_thread_name_windows(const char *thread_name) {
     RaiseException(MS_VC_EXCEPTION, 0, sizeof(info) / sizeof(ULONG_PTR), (ULONG_PTR*)&info);
   } __except(EXCEPTION_EXECUTE_HANDLER) {
   }
+#endif /* _MSC_VER */
+  
+  /* For other compilers (MinGW/GCC), if SetThreadDescription is not available,
+   * we simply cannot set the thread name. This is acceptable as thread naming
+   * is primarily for debugging purposes. */
 }
 #endif
 
