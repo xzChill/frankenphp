@@ -21,11 +21,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #if defined(__linux__)
 #include <sys/prctl.h>
 #elif defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <pthread_np.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 #include "_cgo_export.h"
@@ -717,6 +722,51 @@ sapi_module_struct frankenphp_sapi_module = {
  * Copyright: Johan Hanssen Seferidis
  * License: MIT
  */
+#if defined(_WIN32)
+/* Windows thread name helper */
+static void set_thread_name_windows(const char *thread_name) {
+  /* Use SetThreadDescription if available (Windows 10, version 1607 and later) */
+  typedef HRESULT (WINAPI *SetThreadDescriptionFunc)(HANDLE, PCWSTR);
+  HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+  if (kernel32) {
+    SetThreadDescriptionFunc SetThreadDescription = 
+      (SetThreadDescriptionFunc)GetProcAddress(kernel32, "SetThreadDescription");
+    if (SetThreadDescription) {
+      /* Convert thread_name to wide string */
+      wchar_t wide_name[16];
+      MultiByteToWideChar(CP_UTF8, 0, thread_name, -1, wide_name, 16);
+      SetThreadDescription(GetCurrentThread(), wide_name);
+      return;
+    }
+  }
+  
+  /* Fallback: Use the older exception-based method for older Windows versions */
+  #pragma pack(push,8)
+  typedef struct tagTHREADNAME_INFO {
+    DWORD dwType;     /* Must be 0x1000 */
+    LPCSTR szName;    /* Pointer to name (in user addr space) */
+    DWORD dwThreadID; /* Thread ID (-1=caller thread) */
+    DWORD dwFlags;    /* Reserved for future use, must be zero */
+  } THREADNAME_INFO;
+  #pragma pack(pop)
+  
+  THREADNAME_INFO info;
+  info.dwType = 0x1000;
+  info.szName = thread_name;
+  info.dwThreadID = GetCurrentThreadId();
+  info.dwFlags = 0;
+  
+  #ifndef MS_VC_EXCEPTION
+  #define MS_VC_EXCEPTION 0x406D1388
+  #endif
+  
+  __try {
+    RaiseException(MS_VC_EXCEPTION, 0, sizeof(info) / sizeof(ULONG_PTR), (ULONG_PTR*)&info);
+  } __except(EXCEPTION_EXECUTE_HANDLER) {
+  }
+}
+#endif
+
 static void set_thread_name(char *thread_name) {
 #if defined(__linux__)
   /* Use prctl instead to prevent using _GNU_SOURCE flag and implicit
@@ -726,6 +776,8 @@ static void set_thread_name(char *thread_name) {
   pthread_setname_np(thread_name);
 #elif defined(__FreeBSD__) || defined(__OpenBSD__)
   pthread_set_name_np(pthread_self(), thread_name);
+#elif defined(_WIN32)
+  set_thread_name_windows(thread_name);
 #endif
 }
 
@@ -758,16 +810,18 @@ static void *php_main(void *arg) {
   /*
    * SIGPIPE must be masked in non-Go threads:
    * https://pkg.go.dev/os/signal#hdr-Go_programs_that_use_cgo_or_SWIG
-     But windows does no support SIGPIPE
+   * Windows does not support SIGPIPE, so we skip this on Windows
    */
-  // sigset_t set;
-  // sigemptyset(&set);
-  // sigaddset(&set, SIGPIPE);
+#ifndef _WIN32
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGPIPE);
 
-  // if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
-  //   perror("failed to block SIGPIPE");
-  //   exit(EXIT_FAILURE);
-  // }
+  if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
+    perror("failed to block SIGPIPE");
+    exit(EXIT_FAILURE);
+  }
+#endif
 
   intptr_t num_threads = (intptr_t)arg;
 
