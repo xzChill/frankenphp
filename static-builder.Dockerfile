@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1
+#checkov:skip=CKV_DOCKER_2
+#checkov:skip=CKV_DOCKER_3
+#checkov:skip=CKV_DOCKER_7
 FROM golang-base
+
+ARG TARGETARCH
 
 ARG FRANKENPHP_VERSION=''
 ENV FRANKENPHP_VERSION=${FRANKENPHP_VERSION}
@@ -68,6 +73,21 @@ RUN apk update; \
 		xz ; \
 	ln -sf /usr/bin/php83 /usr/bin/php
 
+# FIXME: temporary workaround for https://github.com/golang/go/issues/68285
+WORKDIR /
+RUN git clone https://go.googlesource.com/go goroot
+WORKDIR /goroot
+# Revert https://github.com/golang/go/commit/3560cf0afb3c29300a6c88ccd98256949ca7a6f6 to prevent the crash with musl
+RUN git config --global user.email "build@example.com" && \
+	git config --global user.name "Build" && \
+	git checkout "$(go env GOVERSION)" && \
+	git revert 3560cf0afb3c29300a6c88ccd98256949ca7a6f6
+WORKDIR /goroot/src
+ENV GOHOSTARCH="$TARGETARCH"
+RUN ./make.bash
+ENV PATH="/goroot/bin:$PATH"
+RUN go version
+
 # https://getcomposer.org/doc/03-cli.md#composer-allow-superuser
 ENV COMPOSER_ALLOW_SUPERUSER=1
 COPY --from=composer/composer:2-bin /composer /usr/bin/composer
@@ -83,7 +103,6 @@ RUN go mod graph | awk '{if ($1 !~ "@") print $2}' | xargs go get
 WORKDIR /go/src/app
 COPY *.* ./
 COPY caddy caddy
-COPY C-Thread-Pool C-Thread-Pool
 
 RUN --mount=type=secret,id=github-token GITHUB_TOKEN=$(cat /run/secrets/github-token) ./build-static.sh && \
 	rm -Rf dist/static-php-cli/source/*

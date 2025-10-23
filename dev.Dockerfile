@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1
+#checkov:skip=CKV_DOCKER_2
+#checkov:skip=CKV_DOCKER_3
 FROM golang:1.22
 
 ENV CFLAGS="-ggdb3"
-ENV PHPIZE_DEPS \
+ENV PHPIZE_DEPS="\
 	autoconf \
 	dpkg-dev \
 	file \
@@ -11,7 +13,7 @@ ENV PHPIZE_DEPS \
 	libc-dev \
 	make \
 	pkg-config \
-	re2c
+	re2c"
 
 # hadolint ignore=DL3009
 RUN apt-get update && \
@@ -65,7 +67,7 @@ WORKDIR /go/src/app
 COPY . .
 
 WORKDIR /go/src/app/caddy/frankenphp
-RUN go build
+RUN go build -buildvcs=false
 
 WORKDIR /go/src/app
 CMD [ "zsh" ]

@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
+#include <inttypes.h>
 #include <php.h>
 #ifdef PHP_WIN32
 #  include <config.w32.h>
@@ -21,9 +22,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-#include "C-Thread-Pool/thpool.c"
-#include "C-Thread-Pool/thpool.h"
+#if defined(__linux__)
+#include <sys/prctl.h>
+#elif defined(__FreeBSD__) || defined(__OpenBSD__)
+#include <pthread_np.h>
+#endif
 
 #include "_cgo_export.h"
 #include "frankenphp_arginfo.h"
@@ -32,8 +35,8 @@
 ZEND_TSRMLS_CACHE_DEFINE()
 #endif
 
-/* Timeouts are currently fundamentally broken with ZTS except on Linux:
- * https://bugs.php.net/bug.php?id=79464 */
+/* Timeouts are currently fundamentally broken with ZTS except on Linux and
+ * FreeBSD: https://bugs.php.net/bug.php?id=79464 */
 #ifndef ZEND_MAX_EXECUTION_TIMERS
 static const char HARDCODED_INI[] = "max_execution_time=0\n"
                                     "max_input_time=-1\n\0";
@@ -77,11 +80,13 @@ typedef struct frankenphp_server_context {
   bool finished;
 } frankenphp_server_context;
 
-static uintptr_t frankenphp_clean_server_context() {
+__thread frankenphp_server_context *local_ctx = NULL;
+
+static void frankenphp_free_request_context() {
   frankenphp_server_context *ctx = SG(server_context);
-  if (ctx == NULL) {
-    return 0;
-  }
+
+  free(ctx->cookie_data);
+  ctx->cookie_data = NULL;
 
   free(SG(request_info).auth_password);
   SG(request_info).auth_password = NULL;
@@ -103,19 +108,13 @@ static uintptr_t frankenphp_clean_server_context() {
 
   free(SG(request_info).request_uri);
   SG(request_info).request_uri = NULL;
-
-  return ctx->current_request;
 }
 
-static void frankenphp_request_reset() {
+static void frankenphp_destroy_super_globals() {
   zend_try {
-    int i;
-
-    for (i = 0; i < NUM_TRACK_VARS; i++) {
-      zval_ptr_dtor(&PG(http_globals)[i]);
+    for (int i = 0; i < NUM_TRACK_VARS; i++) {
+      zval_ptr_dtor_nogc(&PG(http_globals)[i]);
     }
-
-    memset(&PG(http_globals), 0, sizeof(zval) * NUM_TRACK_VARS);
   }
   zend_end_try();
 }
@@ -126,7 +125,7 @@ static void frankenphp_worker_request_shutdown() {
   zend_try { php_output_end_all(); }
   zend_end_try();
 
-  // TODO: store the list of modules to reload in a global module variable
+  /* TODO: store the list of modules to reload in a global module variable */
   const char **module_name;
   zend_module_entry *module;
   for (module_name = MODULES_TO_RELOAD; *module_name; module_name++) {
@@ -141,15 +140,15 @@ static void frankenphp_worker_request_shutdown() {
   zend_try { php_output_deactivate(); }
   zend_end_try();
 
-  /* Clean super globals */
-  frankenphp_request_reset();
-
   /* SAPI related shutdown (free stuff) */
-  frankenphp_clean_server_context();
+  frankenphp_free_request_context();
   zend_try { sapi_deactivate(); }
   zend_end_try();
 
   zend_set_memory_limit(PG(memory_limit));
+  /* TODO: remove next line when https://github.com/php/php-src/pull/14499 will
+   * be available */
+  SG(rfc1867_uploaded_files) = NULL;
 }
 
 /* Adapted from php_request_startup() */
@@ -157,6 +156,7 @@ static int frankenphp_worker_request_startup() {
   int retval = SUCCESS;
 
   zend_try {
+    frankenphp_destroy_super_globals();
     php_output_activate();
 
     /* initialize global variables */
@@ -166,16 +166,13 @@ static int frankenphp_worker_request_startup() {
     /* Keep the current execution context */
     sapi_activate();
 
-    /*
-     * Timeouts are currently fundamentally broken with ZTS:
-     *https://bugs.php.net/bug.php?id=79464
-     *
-     *if (PG(max_input_time) == -1) {
-     *	zend_set_timeout(EG(timeout_seconds), 1);
-     *} else {
-     *	zend_set_timeout(PG(max_input_time), 1);
-     *}
-     */
+#ifdef ZEND_MAX_EXECUTION_TIMERS
+    if (PG(max_input_time) == -1) {
+      zend_set_timeout(EG(timeout_seconds), 1);
+    } else {
+      zend_set_timeout(PG(max_input_time), 1);
+    }
+#endif
 
     if (PG(expose_php)) {
       sapi_add_header(SAPI_PHP_VERSION_HEADER,
@@ -200,11 +197,11 @@ static int frankenphp_worker_request_startup() {
 
     zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
 
-    // unfinish the request
+    /* Unfinish the request */
     frankenphp_server_context *ctx = SG(server_context);
     ctx->finished = false;
 
-    // TODO: store the list of modules to reload in a global module variable
+    /* TODO: store the list of modules to reload in a global module variable */
     const char **module_name;
     zend_module_entry *module;
     for (module_name = MODULES_TO_RELOAD; *module_name; module_name++) {
@@ -270,12 +267,13 @@ PHP_FUNCTION(frankenphp_request_headers) {
 }
 /* }}} */
 
-// add_response_header and apache_response_headers are copied from
-// https://github.com/php/php-src/blob/master/sapi/cli/php_cli_server.c
-// Copyright (c) The PHP Group
-// Licensed under The PHP License
-// Original authors: Moriyoshi Koizumi <moriyoshi@php.net> and Xinchen Hui
-// <laruence@php.net>
+/* add_response_header and apache_response_headers are copied from
+ * https://github.com/php/php-src/blob/master/sapi/cli/php_cli_server.c
+ * Copyright (c) The PHP Group
+ * Licensed under The PHP License
+ * Original authors: Moriyoshi Koizumi <moriyoshi@php.net> and Xinchen Hui
+ * <laruence@php.net>
+ */
 static void add_response_header(sapi_header_struct *h,
                                 zval *return_value) /* {{{ */
 {
@@ -333,7 +331,7 @@ PHP_FUNCTION(frankenphp_handle_request) {
   frankenphp_server_context *ctx = SG(server_context);
 
   if (ctx->main_request == 0) {
-    // not a worker, throw an error
+    /* not a worker, throw an error */
     zend_throw_exception(
         spl_ce_RuntimeException,
         "frankenphp_handle_request() called while not in worker mode", 0);
@@ -351,7 +349,7 @@ PHP_FUNCTION(frankenphp_handle_request) {
   }
 
 #ifdef ZEND_MAX_EXECUTION_TIMERS
-  // Disable timeouts while waiting for a request to handle
+  /* Disable timeouts while waiting for a request to handle */
   zend_unset_timeout();
 #endif
 
@@ -364,9 +362,12 @@ PHP_FUNCTION(frankenphp_handle_request) {
   }
 
 #ifdef ZEND_MAX_EXECUTION_TIMERS
-  // Reset default timeout
-  // TODO: add support for max_input_time
-  zend_set_timeout(INI_INT("max_execution_time"), 0);
+  /*
+   * Reset default timeout
+   */
+  if (PG(max_input_time) != -1) {
+    zend_set_timeout(INI_INT("max_execution_time"), 0);
+  }
 #endif
 
   /* Call the PHP func */
@@ -377,8 +378,10 @@ PHP_FUNCTION(frankenphp_handle_request) {
     zval_ptr_dtor(&retval);
   }
 
-  /* If an exception occured, print the message to the client before closing the
-   * connection */
+  /*
+   * If an exception occured, print the message to the client before closing the
+   * connection
+   */
   if (EG(exception)) {
     zend_exception_error(EG(exception), E_ERROR);
   }
@@ -423,28 +426,17 @@ static zend_module_entry frankenphp_module = {
     TOSTRING(FRANKENPHP_VERSION),
     STANDARD_MODULE_PROPERTIES};
 
-static uintptr_t frankenphp_request_shutdown() {
+static void frankenphp_request_shutdown() {
   frankenphp_server_context *ctx = SG(server_context);
 
   if (ctx->main_request && ctx->current_request) {
-    frankenphp_request_reset();
+    frankenphp_destroy_super_globals();
   }
 
   php_request_shutdown((void *)0);
+  frankenphp_free_request_context();
 
-  free(ctx->cookie_data);
-  ((frankenphp_server_context *)SG(server_context))->cookie_data = NULL;
-  uintptr_t rh = frankenphp_clean_server_context();
-
-  free(ctx);
-  SG(server_context) = NULL;
-  ctx = NULL;
-
-#if defined(ZTS)
-  ts_free_thread();
-#endif
-
-  return rh;
+  memset(local_ctx, 0, sizeof(frankenphp_server_context));
 }
 
 int frankenphp_update_server_context(
@@ -456,21 +448,9 @@ int frankenphp_update_server_context(
   frankenphp_server_context *ctx;
 
   if (create) {
-#ifdef ZTS
-    /* initial resource fetch */
-    (void)ts_resource(0);
-#ifdef PHP_WIN32
-    ZEND_TSRMLS_CACHE_UPDATE();
-#endif
-#endif
+    ctx = local_ctx;
 
-    /* todo: use a pool */
-    ctx = (frankenphp_server_context *)calloc(
-        1, sizeof(frankenphp_server_context));
-    if (ctx == NULL) {
-      return FAILURE;
-    }
-
+    ctx->worker_ready = false;
     ctx->cookie_data = NULL;
     ctx->finished = false;
 
@@ -508,7 +488,8 @@ static size_t frankenphp_ub_write(const char *str, size_t str_length) {
   frankenphp_server_context *ctx = SG(server_context);
 
   if (ctx->finished) {
-    // TODO: maybe log a warning that we tried to write to a finished request?
+    /* TODO: maybe log a warning that we tried to write to a finished request?
+     */
     return 0;
   }
 
@@ -730,10 +711,55 @@ sapi_module_struct frankenphp_sapi_module = {
 
     STANDARD_SAPI_MODULE_PROPERTIES};
 
-static void *manager_thread(void *arg) {
-  // SIGPIPE must be masked in non-Go threads:
-  // https://pkg.go.dev/os/signal#hdr-Go_programs_that_use_cgo_or_SWIG
-  // But windows does no support SIGPIPE
+/* Sets thread name for profiling and debugging.
+ *
+ * Adapted from https://github.com/Pithikos/C-Thread-Pool
+ * Copyright: Johan Hanssen Seferidis
+ * License: MIT
+ */
+static void set_thread_name(char *thread_name) {
+#if defined(__linux__)
+  /* Use prctl instead to prevent using _GNU_SOURCE flag and implicit
+   * declaration */
+  prctl(PR_SET_NAME, thread_name);
+#elif defined(__APPLE__) && defined(__MACH__)
+  pthread_setname_np(thread_name);
+#elif defined(__FreeBSD__) || defined(__OpenBSD__)
+  pthread_set_name_np(pthread_self(), thread_name);
+#endif
+}
+
+static void *php_thread(void *arg) {
+  char thread_name[16] = {0};
+  snprintf(thread_name, 16, "php-%" PRIxPTR, (uintptr_t)arg);
+  set_thread_name(thread_name);
+
+#ifdef ZTS
+  /* initial resource fetch */
+  (void)ts_resource(0);
+#ifdef PHP_WIN32
+  ZEND_TSRMLS_CACHE_UPDATE();
+#endif
+#endif
+
+  local_ctx = malloc(sizeof(frankenphp_server_context));
+
+  while (go_handle_request()) {
+  }
+
+#ifdef ZTS
+  ts_free_thread();
+#endif
+
+  return NULL;
+}
+
+static void *php_main(void *arg) {
+  /*
+   * SIGPIPE must be masked in non-Go threads:
+   * https://pkg.go.dev/os/signal#hdr-Go_programs_that_use_cgo_or_SWIG
+     But windows does no support SIGPIPE
+   */
   // sigset_t set;
   // sigemptyset(&set);
   // sigaddset(&set, SIGPIPE);
@@ -743,9 +769,9 @@ static void *manager_thread(void *arg) {
   //   exit(EXIT_FAILURE);
   // }
 
-  int num_threads = *((int *)arg);
-  free(arg);
-  arg = NULL;
+  intptr_t num_threads = (intptr_t)arg;
+
+  set_thread_name("php-main");
 
 #ifdef ZTS
 #if (PHP_VERSION_ID >= 80300)
@@ -766,6 +792,10 @@ static void *manager_thread(void *arg) {
   frankenphp_sapi_module.ini_entries = HARDCODED_INI;
 #else
   frankenphp_sapi_module.ini_entries = malloc(sizeof(HARDCODED_INI));
+  if (frankenphp_sapi_module.ini_entries == NULL) {
+    perror("malloc failed");
+    exit(EXIT_FAILURE);
+  }
   memcpy(frankenphp_sapi_module.ini_entries, HARDCODED_INI,
          sizeof(HARDCODED_INI));
 #endif
@@ -773,17 +803,30 @@ static void *manager_thread(void *arg) {
 
   frankenphp_sapi_module.startup(&frankenphp_sapi_module);
 
-  threadpool thpool = thpool_init(num_threads);
-
-  uintptr_t rh;
-  while ((rh = go_fetch_request())) {
-    thpool_add_work(thpool, go_execute_script, (void *)rh);
+  pthread_t *threads = malloc(num_threads * sizeof(pthread_t));
+  if (threads == NULL) {
+    perror("malloc failed");
+    exit(EXIT_FAILURE);
   }
 
-  /* channel closed, shutdown gracefully */
-  thpool_wait(thpool);
-  thpool_destroy(thpool);
+  for (uintptr_t i = 0; i < num_threads; i++) {
+    if (pthread_create(&(*(threads + i)), NULL, &php_thread, (void *)i) != 0) {
+      perror("failed to create PHP thread");
+      free(threads);
+      exit(EXIT_FAILURE);
+    }
+  }
 
+  for (int i = 0; i < num_threads; i++) {
+    if (pthread_join((*(threads + i)), NULL) != 0) {
+      perror("failed to join PHP thread");
+      free(threads);
+      exit(EXIT_FAILURE);
+    }
+  }
+  free(threads);
+
+  /* channel closed, shutdown gracefully */
   frankenphp_sapi_module.shutdown(&frankenphp_sapi_module);
 
   sapi_shutdown();
@@ -806,10 +849,7 @@ static void *manager_thread(void *arg) {
 int frankenphp_init(int num_threads) {
   pthread_t thread;
 
-  int *num_threads_ptr = calloc(1, sizeof(int));
-  *num_threads_ptr = num_threads;
-
-  if (pthread_create(&thread, NULL, *manager_thread, (void *)num_threads_ptr) !=
+  if (pthread_create(&thread, NULL, &php_main, (void *)(intptr_t)num_threads) !=
       0) {
     go_shutdown();
 
@@ -823,11 +863,6 @@ int frankenphp_request_startup() {
   if (php_request_startup() == SUCCESS) {
     return SUCCESS;
   }
-
-  frankenphp_server_context *ctx = SG(server_context);
-  SG(server_context) = NULL;
-  free(ctx);
-  ctx = NULL;
 
   php_request_shutdown((void *)0);
 
@@ -861,23 +896,25 @@ int frankenphp_execute_script(char *file_name) {
 
   zend_destroy_file_handle(&file_handle);
 
-  frankenphp_clean_server_context();
+  frankenphp_free_request_context();
   frankenphp_request_shutdown();
 
   return status;
 }
 
-// Use global variables to store CLI arguments to prevent useless allocations
+/* Use global variables to store CLI arguments to prevent useless allocations */
 static char *cli_script;
 static int cli_argc;
 static char **cli_argv;
 
-// CLI code is adapted from
-// https://github.com/php/php-src/blob/master/sapi/cli/php_cli.c Copyright (c)
-// The PHP Group Licensed under The PHP License Original uthors: Edin Kadribasic
-// <edink@php.net>, Marcus Boerger <helly@php.net> and Johannes Schlueter
-// <johannes@php.net> Parts based on CGI SAPI Module by Rasmus Lerdorf, Stig
-// Bakken and Zeev Suraski
+/*
+ * CLI code is adapted from
+ * https://github.com/php/php-src/blob/master/sapi/cli/php_cli.c Copyright (c)
+ * The PHP Group Licensed under The PHP License Original uthors: Edin Kadribasic
+ * <edink@php.net>, Marcus Boerger <helly@php.net> and Johannes Schlueter
+ * <johannes@php.net> Parts based on CGI SAPI Module by Rasmus Lerdorf, Stig
+ * Bakken and Zeev Suraski
+ */
 static void cli_register_file_handles(bool no_close) /* {{{ */
 {
   php_stream *s_in, *s_out, *s_err;
@@ -904,7 +941,7 @@ static void cli_register_file_handles(bool no_close) /* {{{ */
     s_err->flags |= PHP_STREAM_FLAG_NO_CLOSE;
   }
 
-  // s_in_process = s_in;
+  /*s_in_process = s_in;*/
 
   php_stream_to_zval(s_in, &ic.value);
   php_stream_to_zval(s_out, &oc.value);
@@ -929,7 +966,8 @@ static void sapi_cli_register_variables(zval *track_vars_array) /* {{{ */
   size_t len;
   char *docroot = "";
 
-  /* In CGI mode, we consider the environment to be a part of the server
+  /*
+   * In CGI mode, we consider the environment to be a part of the server
    * variables
    */
   php_import_environment_variables(track_vars_array);
@@ -968,7 +1006,9 @@ static void sapi_cli_register_variables(zval *track_vars_array) /* {{{ */
 static void *execute_script_cli(void *arg) {
   void *exit_status;
 
-  // The SAPI name "cli" is hardcoded into too many programs... let's usurp it.
+  /*
+   * The SAPI name "cli" is hardcoded into too many programs... let's usurp it.
+   */
   php_embed_module.name = "cli";
   php_embed_module.pretty_name = "PHP CLI embedded in FrankenPHP";
   php_embed_module.register_server_variables = sapi_cli_register_variables;
@@ -1001,8 +1041,10 @@ int frankenphp_execute_script_cli(char *script, int argc, char **argv) {
   cli_argc = argc;
   cli_argv = argv;
 
-  // Start the script in a dedicated thread to prevent conflicts between Go and
-  // PHP signal handlers
+  /*
+   * Start the script in a dedicated thread to prevent conflicts between Go and
+   * PHP signal handlers
+   */
   err = pthread_create(&thread, NULL, execute_script_cli, NULL);
   if (err != 0) {
     return err;

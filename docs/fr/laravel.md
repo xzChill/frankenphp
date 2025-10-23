@@ -23,7 +23,6 @@ Vous pouvez également exécuter vos projets Laravel avec FrankenPHP depuis votr
  	```caddyfile
     {
      frankenphp
-     order php_server before file_server
     }
 
     # Le nom de domaine de votre serveur
@@ -53,13 +52,13 @@ Après avoir installé Octane, vous pouvez exécuter la commande Artisan `octane
 php artisan octane:install --server=frankenphp
 ```
 
-Le serveur Octane peut être démarré via la commande Artisan `octane:start`.
+Le serveur Octane peut être démarré via la commande Artisan `octane:frankenphp`.
 
 ```console
-php artisan octane:start
+php artisan octane:frankenphp
 ```
 
-La commande `octane:start` peut prendre les options suivantes :
+La commande `octane:frankenphp` peut prendre les options suivantes :
 
 * `--host` : L'adresse IP à laquelle le serveur doit se lier (par défaut : `127.0.0.1`)
 * `--port` : Le port sur lequel le serveur doit être disponible (par défaut : `8000`)

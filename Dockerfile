@@ -1,4 +1,7 @@
 # syntax=docker/dockerfile:1
+#checkov:skip=CKV_DOCKER_2
+#checkov:skip=CKV_DOCKER_3
+#checkov:skip=CKV_DOCKER_7
 FROM php-base AS common
 
 WORKDIR /app
@@ -27,8 +30,8 @@ CMD ["--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
 HEALTHCHECK CMD curl -f http://localhost:2019/metrics || exit 1
 
 # See https://caddyserver.com/docs/conventions#file-locations for details
-ENV XDG_CONFIG_HOME /config
-ENV XDG_DATA_HOME /data
+ENV XDG_CONFIG_HOME=/config
+ENV XDG_DATA_HOME=/data
 
 EXPOSE 80
 EXPOSE 443
@@ -50,7 +53,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 COPY --from=golang-base /usr/local/go /usr/local/go
 
-ENV PATH /usr/local/go/bin:$PATH
+ENV PATH=/usr/local/go/bin:$PATH
 
 # This is required to link the FrankenPHP binary to the PHP binary
 RUN apt-get update && \
@@ -80,7 +83,6 @@ RUN go mod graph | awk '{if ($1 !~ "@") print $2}' | xargs go get
 WORKDIR /go/src/app
 COPY --link *.* ./
 COPY --link caddy caddy
-COPY --link C-Thread-Pool C-Thread-Pool
 COPY --link internal internal
 COPY --link testdata testdata
 

@@ -319,7 +319,7 @@ func Init(options ...Option) error {
 		return err
 	}
 
-	logger.Info("FrankenPHP started 🐘", zap.String("php_version", Version().Version))
+	logger.Info("FrankenPHP started 🐘", zap.String("php_version", Version().Version), zap.Int("num_threads", opt.numThreads))
 	if EmbeddedAppPath != "" {
 		logger.Info("embedded PHP app 📦", zap.String("path", EmbeddedAppPath))
 	}
@@ -462,16 +462,36 @@ func ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) error 
 	return nil
 }
 
-//export go_fetch_request
-func go_fetch_request() C.uintptr_t {
+//export go_handle_request
+func go_handle_request() bool {
 	select {
 	case <-done:
-		return 0
+		return false
 
 	case r := <-requestChan:
 		h := cgo.NewHandle(r)
 		r.Context().Value(handleKey).(*handleList).AddHandle(h)
-		return C.uintptr_t(h)
+
+		fc, ok := FromContext(r.Context())
+		if !ok {
+			panic(InvalidRequestError)
+		}
+		defer func() {
+			maybeCloseContext(fc)
+			r.Context().Value(handleKey).(*handleList).FreeAll()
+		}()
+
+		if err := updateServerContext(r, true, 0); err != nil {
+			panic(err)
+		}
+
+		// scriptFilename is freed in frankenphp_execute_script()
+		fc.exitStatus = C.frankenphp_execute_script(C.CString(fc.scriptFilename))
+		if fc.exitStatus < 0 {
+			panic(ScriptExecutionError)
+		}
+
+		return true
 	}
 }
 
@@ -479,33 +499,6 @@ func maybeCloseContext(fc *FrankenPHPContext) {
 	fc.closed.Do(func() {
 		close(fc.done)
 	})
-}
-
-// go_execute_script Note: only called in cgi-mode
-//
-//export go_execute_script
-func go_execute_script(rh unsafe.Pointer) {
-	handle := cgo.Handle(rh)
-
-	request := handle.Value().(*http.Request)
-	fc, ok := FromContext(request.Context())
-	if !ok {
-		panic(InvalidRequestError)
-	}
-	defer func() {
-		maybeCloseContext(fc)
-		request.Context().Value(handleKey).(*handleList).FreeAll()
-	}()
-
-	if err := updateServerContext(request, true, 0); err != nil {
-		panic(err)
-	}
-
-	// scriptFilename is freed in frankenphp_execute_script()
-	fc.exitStatus = C.frankenphp_execute_script(C.CString(fc.scriptFilename))
-	if fc.exitStatus < 0 {
-		panic(ScriptExecutionError)
-	}
 }
 
 //export go_ub_write
@@ -718,13 +711,6 @@ func go_sapi_flush(rh C.uintptr_t) bool {
 		return true
 	}
 
-	if r.ProtoMajor == 1 {
-		if _, err := r.Body.Read(nil); err != nil {
-			// Don't flush until the whole body has been read to prevent https://github.com/golang/go/issues/15527
-			return false
-		}
-	}
-
 	if err := http.NewResponseController(fc.responseWriter).Flush(); err != nil {
 		fc.logger.Error("the current responseWriter is not a flusher", zap.Error(err))
 	}
@@ -760,7 +746,7 @@ func go_read_cookies(rh C.uintptr_t) *C.char {
 		cookieStrings[i] = cookie.String()
 	}
 
-	// freed in frankenphp_request_shutdown()
+	// freed in frankenphp_free_request_context()
 	return C.CString(strings.Join(cookieStrings, "; "))
 }
 

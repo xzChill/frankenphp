@@ -34,10 +34,10 @@ $fiber->resume();
 
 The following extensions are known not to be compatible with FrankenPHP:
 
-| Name                                                                                                       | Reason          | Alternatives                                                                                                         |
-| ---------------------------------------------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------- |
-| [imap](https://www.php.net/manual/en/imap.installation.php)                                                | Not thread-safe | [javanile/php-imap2](https://github.com/javanile/php-imap2), [webklex/php-imap](https://github.com/Webklex/php-imap) |
-| [newrelic](https://docs.newrelic.com/docs/apm/agents/php-agent/getting-started/introduction-new-relic-php/)| Not thread-safe | -                                                                                                                    |
+| Name                                                                                                        | Reason          | Alternatives                                                                                                         |
+|-------------------------------------------------------------------------------------------------------------|-----------------|----------------------------------------------------------------------------------------------------------------------|
+| [imap](https://www.php.net/manual/en/imap.installation.php)                                                 | Not thread-safe | [javanile/php-imap2](https://github.com/javanile/php-imap2), [webklex/php-imap](https://github.com/Webklex/php-imap) |
+| [newrelic](https://docs.newrelic.com/docs/apm/agents/php-agent/getting-started/introduction-new-relic-php/) | Not thread-safe | -                                                                                                                    |
 
 ## Buggy PHP Extensions
 
@@ -46,6 +46,7 @@ The following extensions have known bugs and unexpected behaviors when used with
 | Name                                                          | Problem                                                                                                                                                                                                                                                                                         |
 |---------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | [ext-openssl](https://www.php.net/manual/en/book.openssl.php) | When using a static build of FrankenPHP (built with the musl libc), the OpenSSL extension may crash under heavy loads. A workaround is to use a dynamically linked build (like the one used in Docker images). This bug is [being tracked by PHP](https://github.com/php/php-src/issues/13648). |
+| [parallel](https://github.com/krakjoe/parallel)               | `parallel` makes FrankenPHP freeze and crash. [Bug report](https://github.com/krakjoe/parallel/issues/308)                                                                                                                                                                                      |
 
 ## get_browser
 
@@ -131,9 +132,42 @@ done
 /usr/local/bin/frankenphp php-cli ${args[@]}
 ```
 
-Then set the environment variable `PHP_BINARY` to the path of our php script and composer should pass:
+Then set the environment variable `PHP_BINARY` to the path of our `php` script and run Composer:
 
-```bash
+```console
 export PHP_BINARY=/usr/local/bin/php
 composer install
+```
+
+## Troubleshooting TLS/SSL Issues with Static Binaries
+
+When using the static binaries, you may encounter the following TLS-related errors, for instance when sending emails using STARTTLS:
+
+```text
+Unable to connect with STARTTLS: stream_socket_enable_crypto(): SSL operation failed with code 5. OpenSSL Error messages:
+error:80000002:system library::No such file or directory
+error:80000002:system library::No such file or directory
+error:80000002:system library::No such file or directory
+error:0A000086:SSL routines::certificate verify failed
+```
+
+As the static binary doesn't bundle TLS certificates, you need to point OpenSSL to your local CA certificates installation.
+
+Inspect the output of [`openssl_get_cert_locations()`](https://www.php.net/manual/en/function.openssl-get-cert-locations.php),
+to find where CA certificates must be installed and store them at this location.
+
+> ![WARNING]
+> Web and CLI contexts may have different settings.
+> Be sure to run `openssl_get_cert_locations()` in the proper context.
+
+[CA certificates extracted from Mozilla can be downloaded on the curl site](https://curl.se/docs/caextract.html).
+
+Alternatively, many distributions, including Debian, Ubuntu, and Alpine provide packages named `ca-certificates` that contain these certificates.
+
+It's also possible to use the `SSL_CERT_FILE` and `SSL_CERT_DIR` to hint OpenSSL where to look for CA certificates:
+
+```console
+# Set TLS certificates environment variables
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export SSL_CERT_DIR=/etc/ssl/certs
 ```

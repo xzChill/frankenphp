@@ -2,11 +2,11 @@
 
 FrankenPHP, Caddy as well as the Mercure and Vulcain modules can be configured using [the formats supported by Caddy](https://caddyserver.com/docs/getting-started#your-first-config).
 
-In the Docker image, the `Caddyfile` is located at `/etc/caddy/Caddyfile`.
+In [the Docker images](docker.md), the `Caddyfile` is located at `/etc/caddy/Caddyfile`.
 
 You can also configure PHP using `php.ini` as usual.
 
-In the Docker image, the `php.ini` file is not present, you can create it manually  or copy an official template:
+In the Docker images, the `php.ini` file is not present, you can create it manually  or copy an official template:
 
 ```dockerfile
 FROM dunglas/frankenphp
@@ -18,6 +18,9 @@ RUN cp $PHP_INI_DIR/php.ini-development $PHP_INI_DIR/php.ini
 RUN cp $PHP_INI_DIR/php.ini-production $PHP_INI_DIR/php.ini
 ```
 
+The static binary will look for a `php.ini` file in the current working directory,
+in `/lib/` as well as [the other standard locations](https://www.php.net/manual/en/configuration.file.php).
+
 ## Caddyfile Config
 
 To register the FrankenPHP executor, the `frankenphp` [global option](https://caddyserver.com/docs/caddyfile/concepts#global-options) must be set, then the `php_server` or the `php` [HTTP directives](https://caddyserver.com/docs/caddyfile/concepts#directives) may be used within the site blocks to serve your PHP app.
@@ -28,8 +31,6 @@ Minimal example:
 {
 	# Enable FrankenPHP
 	frankenphp
-	# Configure when the directive must be executed
-	order php_server before file_server
 }
 
 localhost {
@@ -128,6 +129,32 @@ php_server [<matcher>] {
 	env <key> <value> # Sets an extra environment variable to the given value. Can be specified more than once for multiple environment variables.
 }
 ```
+
+### Full Duplex (HTTP/1)
+
+When using HTTP/1.x, it may be desirable to enable full-duplex mode to allow writing a response before the entire body
+has been read. (for example: WebSocket, Server-Sent Events, etc.)
+
+This is an opt-in configuration that needs to be added to the global options in the `Caddyfile`:
+
+```caddyfile
+{
+  servers {
+    enable_full_duplex
+  }
+}
+```
+
+> ![CAUTION]
+>
+> Enabling this option may cause old HTTP/1.x clients that don't support full-duplex to deadlock.
+This can also be configured using the `CADDY_GLOBAL_OPTIONS` environment config:
+
+```sh
+CADDY_GLOBAL_OPTIONS="servers { enable_full_duplex }"
+```
+
+You can find more information about this setting in the [Caddy documentation](https://caddyserver.com/docs/caddyfile/options#enable-full-duplex).
 
 ## Environment Variables
 

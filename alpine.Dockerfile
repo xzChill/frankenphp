@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1
+#checkov:skip=CKV_DOCKER_2
+#checkov:skip=CKV_DOCKER_3
+#checkov:skip=CKV_DOCKER_7
 FROM php-base AS common
+
+ARG TARGETARCH
 
 WORKDIR /app
 
@@ -24,8 +29,8 @@ CMD ["--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
 HEALTHCHECK CMD curl -f http://localhost:2019/metrics || exit 1
 
 # See https://caddyserver.com/docs/conventions#file-locations for details
-ENV XDG_CONFIG_HOME /config
-ENV XDG_DATA_HOME /data
+ENV XDG_CONFIG_HOME=/config
+ENV XDG_DATA_HOME=/data
 
 EXPOSE 80
 EXPOSE 443
@@ -47,7 +52,7 @@ SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
 COPY --link --from=golang-base /usr/local/go /usr/local/go
 
-ENV PATH /usr/local/go/bin:$PATH
+ENV PATH=/usr/local/go/bin:$PATH
 
 # hadolint ignore=SC2086
 RUN apk add --no-cache --virtual .build-deps \
@@ -64,7 +69,25 @@ RUN apk add --no-cache --virtual .build-deps \
 	openssl-dev \
 	readline-dev \
 	sqlite-dev \
-	upx
+	upx \
+	# Needed for the custom Go build
+	git \
+	bash
+
+# FIXME: temporary workaround for https://github.com/golang/go/issues/68285
+WORKDIR /
+RUN git clone https://go.googlesource.com/go goroot
+WORKDIR /goroot
+# Revert https://github.com/golang/go/commit/3560cf0afb3c29300a6c88ccd98256949ca7a6f6 to prevent the crash with musl
+RUN git config --global user.email "build@example.com" && \
+	git config --global user.name "Build" && \
+	git checkout "$(go env GOVERSION)" && \
+	git revert 3560cf0afb3c29300a6c88ccd98256949ca7a6f6
+WORKDIR /goroot/src
+ENV GOHOSTARCH="$TARGETARCH"
+RUN ./make.bash
+ENV PATH="/goroot/bin:$PATH"
+RUN go version
 
 WORKDIR /go/src/app
 
@@ -78,7 +101,6 @@ RUN go mod graph | awk '{if ($1 !~ "@") print $2}' | xargs go get
 WORKDIR /go/src/app
 COPY --link *.* ./
 COPY --link caddy caddy
-COPY --link C-Thread-Pool C-Thread-Pool
 COPY --link internal internal
 COPY --link testdata testdata
 
