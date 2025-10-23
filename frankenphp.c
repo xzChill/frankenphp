@@ -146,7 +146,7 @@ static void frankenphp_worker_request_shutdown() {
   SG(rfc1867_uploaded_files) = NULL;
 }
 
-PHPAPI void get_full_env(zval *track_vars_array) {
+void get_full_env(zval *track_vars_array) {
   struct go_getfullenv_return full_env = go_getfullenv(thread_index);
 
   for (int i = 0; i < full_env.r1; i++) {
