@@ -29,7 +29,7 @@ If docker version is lower than 23.0, build is failed by dockerignore [pattern i
 ## Running the test suite
 
 ```console
-go test -race -v ./...
+go test -tags watcher -race -v ./...
 ```
 
 ## Caddy module
@@ -38,7 +38,7 @@ Build Caddy with the FrankenPHP Caddy module:
 
 ```console
 cd caddy/frankenphp/
-go build
+go build -tags watcher,brotli,nobadger,nomysql,nopgx
 cd ../../
 ```
 
@@ -118,7 +118,7 @@ docker buildx bake -f docker-bake.hcl --pull --no-cache --push
     ```
 
 2. Replace your current version of `frankenphp` by the debug FrankenPHP executable
-3. Start FrankenPHP as usual (alternatively, you can directly start FrankenPHP with GDB: `gdb --args ./frankenphp run`)
+3. Start FrankenPHP as usual (alternatively, you can directly start FrankenPHP with GDB: `gdb --args frankenphp run`)
 4. Attach to the process with GDB:
 
     ```console
@@ -171,8 +171,8 @@ docker buildx bake -f docker-bake.hcl --pull --no-cache --push
 8. In the container, you can use GDB and the like:
 
     ```console
-    go test -c -ldflags=-w
-    gdb --args ./frankenphp.test -test.run ^MyTest$
+    go test -tags watcher -c -ldflags=-w
+    gdb --args frankenphp.test -test.run ^MyTest$
     ```
 
 9. When the bug is fixed, revert all these changes
@@ -209,7 +209,7 @@ follow these steps:
 1. Create a new directory named with the language's 2-character ISO code in this repository's `docs/` directory
 2. Copy all the `.md` files in the root of the `docs/` directory into the new directory (always use the English version as source for translation, as it's always up to date)
 3. Copy the `README.md` and `CONTRIBUTING.md` files from the root directory to the new directory
-4. Translate the content of the files, but don't change the filenames, also don't translates strings starting with `> [!` (it's special markup for GitHub)
+4. Translate the content of the files, but don't change the filenames, also don't translate strings starting with `> [!` (it's special markup for GitHub)
 5. Create a Pull Request with the translations
 6. In the [site repository](https://github.com/dunglas/frankenphp-website/tree/main), copy and translate the translation files in the `content/`, `data/` and `i18n/` directories
 7. Translate the values in the created YAML file

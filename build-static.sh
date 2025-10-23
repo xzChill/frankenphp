@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 set -o errexit
 set -x
@@ -28,12 +28,12 @@ if [ -z "${PHP_EXTENSIONS}" ]; then
 		export PHP_EXTENSIONS
 		cd -
 	else
-		export PHP_EXTENSIONS="apcu,bcmath,bz2,calendar,ctype,curl,dba,dom,exif,fileinfo,filter,ftp,gd,gmp,gettext,iconv,igbinary,imagick,intl,ldap,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlite3,ssh2,sysvmsg,sysvsem,sysvshm,tidy,tokenizer,xlswriter,xml,xmlreader,xmlwriter,zip,zlib,yaml,zstd"
+		export PHP_EXTENSIONS="apcu,bcmath,bz2,calendar,ctype,curl,dba,dom,exif,fileinfo,filter,ftp,gd,gmp,gettext,iconv,igbinary,imagick,intl,ldap,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,parallel,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlite3,ssh2,sysvmsg,sysvsem,sysvshm,tidy,tokenizer,xlswriter,xml,xmlreader,xmlwriter,zip,zlib,yaml,zstd"
 	fi
 fi
 
 if [ -z "${PHP_EXTENSION_LIBS}" ]; then
-	export PHP_EXTENSION_LIBS="bzip2,freetype,libavif,libjpeg,liblz4,libwebp,libzip"
+	export PHP_EXTENSION_LIBS="bzip2,freetype,libavif,libjpeg,liblz4,libwebp,libzip,nghttp2"
 fi
 
 # The Brotli library must always be built as it is required by http://github.com/dunglas/caddy-cbrotli
@@ -120,22 +120,52 @@ else
 	./bin/spc build --debug --enable-zts --build-embed ${extraOpts} "${PHP_EXTENSIONS}" --with-libs="${PHP_EXTENSION_LIBS}"
 fi
 
+curlGitHubHeaders=(--header "X-GitHub-Api-Version: 2022-11-28")
+if [ "${GITHUB_TOKEN}" ]; then
+	curlGitHubHeaders+=(--header "Authorization: Bearer ${GITHUB_TOKEN}")
+fi
+
+# Compile e-dant/watcher as a static library
+mkdir watcher
+cd watcher
+curl -f --retry 5 "${curlGitHubHeaders[@]}" https://api.github.com/repos/e-dant/watcher/releases/latest |
+	grep tarball_url |
+	awk '{ print $2 }' |
+	sed 's/,$//' |
+	sed 's/"//g' |
+	xargs curl -fL --retry 5 "${curlGitHubHeaders[@]}" |
+	tar xz --strip-components 1
+cd watcher-c
+cc -c -o libwatcher-c.o ./src/watcher-c.cpp -I ./include -I ../include -std=c++17 -Wall -Wextra -fPIC
+ar rcs libwatcher-c.a libwatcher-c.o
+cp libwatcher-c.a ../../buildroot/lib/libwatcher-c.a
+mkdir -p ../../buildroot/include/wtr
+cp -R include/wtr/watcher-c.h ../../buildroot/include/wtr/watcher-c.h
+cd ../../
+
+# See https://github.com/docker-library/php/blob/master/8.3/alpine3.20/zts/Dockerfile#L53-L55
 CGO_CFLAGS="-DFRANKENPHP_VERSION=${FRANKENPHP_VERSION} -I${PWD}/buildroot/include/ $(./buildroot/bin/php-config --includes | sed s#-I/#-I"${PWD}"/buildroot/#g)"
 if [ -n "${DEBUG_SYMBOLS}" ]; then
 	CGO_CFLAGS="-g ${CGO_CFLAGS}"
+else
+	CGO_CFLAGS="-fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64 ${CGO_CFLAGS}"
 fi
 export CGO_CFLAGS
+export CGO_CPPFLAGS="${CGO_CFLAGS}"
 
 if [ "${os}" = "mac" ]; then
 	export CGO_LDFLAGS="-framework CoreFoundation -framework SystemConfiguration"
+elif [ "${os}" = "linux" ] && [ -z "${DEBUG_SYMBOLS}" ]; then
+	CGO_LDFLAGS="-Wl,-O1 -pie"
 fi
 
-CGO_LDFLAGS="${CGO_LDFLAGS} ${PWD}/buildroot/lib/libbrotlicommon.a ${PWD}/buildroot/lib/libbrotlienc.a ${PWD}/buildroot/lib/libbrotlidec.a $(./buildroot/bin/php-config --ldflags || true) $(./buildroot/bin/php-config --libs || true)"
+CGO_LDFLAGS="${CGO_LDFLAGS} ${PWD}/buildroot/lib/libbrotlicommon.a ${PWD}/buildroot/lib/libbrotlienc.a ${PWD}/buildroot/lib/libbrotlidec.a ${PWD}/buildroot/lib/libwatcher-c.a $(./buildroot/bin/php-config --ldflags || true) $(./buildroot/bin/php-config --libs | sed -e 's/-lgcc_s//g' || true)"
 if [ "${os}" = "linux" ]; then
 	if echo "${PHP_EXTENSIONS}" | grep -qE "\b(intl|imagick|grpc|v8js|protobuf|mongodb|tbb)\b"; then
 		CGO_LDFLAGS="${CGO_LDFLAGS} -lstdc++"
 	fi
 fi
+
 export CGO_LDFLAGS
 
 LIBPHP_VERSION="$(./buildroot/bin/php-config --version)"
@@ -166,7 +196,7 @@ if [ "${os}" = "linux" ]; then
 
 			git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1 || true)" || true)"
 
-			curl -f -L --retry 5 https://raw.githubusercontent.com/tweag/rust-alpine-mimalloc/b26002b49d466a295ea8b50828cb7520a71a872a/mimalloc.diff -o mimalloc.diff
+			curl -fL --retry 5 https://raw.githubusercontent.com/tweag/rust-alpine-mimalloc/b26002b49d466a295ea8b50828cb7520a71a872a/mimalloc.diff -o mimalloc.diff
 			patch -p1 <mimalloc.diff
 
 			mkdir -p out/
@@ -233,7 +263,7 @@ fi
 
 cd caddy/frankenphp/
 go env
-go build -buildmode=pie -tags "cgo netgo osusergo static_build" -ldflags "-linkmode=external -extldflags '-static-pie ${extraExtldflags}' ${extraLdflags} -X 'github.com/caddyserver/caddy/v2.CustomVersion=FrankenPHP ${FRANKENPHP_VERSION} PHP ${LIBPHP_VERSION} Caddy'" -o "../../dist/${bin}"
+go build -buildmode=pie -tags "cgo,netgo,osusergo,static_build,nobadger,nomysql,nopgx" -ldflags "-linkmode=external -extldflags '-static-pie ${extraExtldflags}' ${extraLdflags} -X 'github.com/caddyserver/caddy/v2.CustomVersion=FrankenPHP ${FRANKENPHP_VERSION} PHP ${LIBPHP_VERSION} Caddy'" -o "../../dist/${bin}"
 cd ../..
 
 if [ -d "${EMBED}" ]; then

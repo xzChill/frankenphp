@@ -3,23 +3,27 @@
 FrankenPHP, Caddy as well as the Mercure and Vulcain modules can be configured using [the formats supported by Caddy](https://caddyserver.com/docs/getting-started#your-first-config).
 
 In [the Docker images](docker.md), the `Caddyfile` is located at `/etc/caddy/Caddyfile`.
+The static binary will look for the `Caddyfile` in the directory in which it is started.
 
-You can also configure PHP using `php.ini` as usual.
+PHP itself can be configured [using a `php.ini` file](https://www.php.net/manual/en/configuration.file.php).
 
-In the Docker images, the `php.ini` file is not present, you can create it manually  or copy an official template:
+By default, PHP supplied with Docker images and the one included in the static binary will look for a `php.ini` file in the directory where FrankenPHP is started and in `/usr/local/etc/php/`. They will also load all files ending in `.ini` from `/usr/local/etc/php/conf.d/`.
+
+No `php.ini` file is present by default, you should copy an official template provided by the PHP project.
+
+On Docker, the templates are provided in the images:
 
 ```dockerfile
 FROM dunglas/frankenphp
 
-# Developement:
-RUN cp $PHP_INI_DIR/php.ini-development $PHP_INI_DIR/php.ini
-
-# Or production:
+# Production:
 RUN cp $PHP_INI_DIR/php.ini-production $PHP_INI_DIR/php.ini
+
+# Or developement:
+RUN cp $PHP_INI_DIR/php.ini-development $PHP_INI_DIR/php.ini
 ```
 
-The static binary will look for a `php.ini` file in the current working directory,
-in `/lib/` as well as [the other standard locations](https://www.php.net/manual/en/configuration.file.php).
+If you don't use Docker, copy one of `php.ini-production` or `php.ini-development` provided [in the PHP sources](https://github.com/php/php-src/).
 
 ## Caddyfile Config
 
@@ -51,6 +55,7 @@ Optionally, the number of threads to create and [worker scripts](worker.md) to s
 			file <path> # Sets the path to the worker script.
 			num <num> # Sets the number of PHP threads to start, defaults to 2x the number of available CPUs.
 			env <key> <value> # Sets an extra environment variable to the given value. Can be specified more than once for multiple environment variables.
+			watch <path> # Sets the path to watch for file changes. Can be specified more than once for multiple paths.
 		}
 	}
 }
@@ -127,8 +132,54 @@ php_server [<matcher>] {
 	split_path <delim...> # Sets the substrings for splitting the URI into two parts. The first matching substring will be used to split the "path info" from the path. The first piece is suffixed with the matching substring and will be assumed as the actual resource (CGI script) name. The second piece will be set to PATH_INFO for the script to use. Default: `.php`
 	resolve_root_symlink false # Disables resolving the `root` directory to its actual value by evaluating a symbolic link, if one exists (enabled by default).
 	env <key> <value> # Sets an extra environment variable to the given value. Can be specified more than once for multiple environment variables.
+	file_server off # Disables the built-in file_server directive.
 }
 ```
+
+### Watching for File Changes
+
+Since workers only boot your application once and keep it in memory, any changes
+to your PHP files will not be reflected immediately.
+
+Workers can instead be restarted on file changes via the `watch` directive.
+This is useful for development environments.
+
+```caddyfile
+{
+	frankenphp {
+		worker {
+			file  /path/to/app/public/worker.php
+			watch
+		}
+	}
+}
+```
+
+If the `watch` directory is not specified, it will fall back to `./**/*.{php,yaml,yml,twig,env}`,
+which watches all `.php`, `.yaml`, `.yml`, `.twig` and `.env` files in the directory and subdirectories
+where the FrankenPHP process was started. You can instead also specify one or more directories via a
+[shell filename pattern](https://pkg.go.dev/path/filepath#Match):
+
+```caddyfile
+{
+	frankenphp {
+		worker {
+			file  /path/to/app/public/worker.php
+			watch /path/to/app # watches all files in all subdirectories of /path/to/app
+			watch /path/to/app/*.php # watches files ending in .php in /path/to/app
+			watch /path/to/app/**/*.php # watches PHP files in /path/to/app and subdirectories
+			watch /path/to/app/**/*.{php,twig} # watches PHP and Twig files in /path/to/app and subdirectories
+		}
+	}
+}
+```
+
+* The `**` pattern signifies recursive watching
+* Directories can also be relative (to where the FrankenPHP process is started from)
+* If you have multiple workers defined, all of them will be restarted when a file changes
+* Be wary about watching files that are created at runtime (like logs) since they might cause unwanted worker restarts.
+
+The file watcher is based on [e-dant/watcher](https://github.com/e-dant/watcher).
 
 ### Full Duplex (HTTP/1)
 
@@ -145,10 +196,10 @@ This is an opt-in configuration that needs to be added to the global options in 
 }
 ```
 
-> ![CAUTION]
+> [!CAUTION]
 >
 > Enabling this option may cause old HTTP/1.x clients that don't support full-duplex to deadlock.
-This can also be configured using the `CADDY_GLOBAL_OPTIONS` environment config:
+> This can also be configured using the `CADDY_GLOBAL_OPTIONS` environment config:
 
 ```sh
 CADDY_GLOBAL_OPTIONS="servers { enable_full_duplex }"

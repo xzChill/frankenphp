@@ -11,6 +11,7 @@ import (
 	"time"
 
 	mercureModule "github.com/dunglas/mercure/caddy"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
@@ -21,7 +22,6 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/rewrite"
 	"github.com/caddyserver/certmagic"
 	"github.com/dunglas/frankenphp"
-	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"
 )
@@ -29,7 +29,7 @@ import (
 func init() {
 	caddycmd.RegisterCommand(caddycmd.Command{
 		Name:  "php-server",
-		Usage: "[--domain <example.com>] [--root <path>] [--listen <addr>] [--worker /path/to/worker.php<,nb-workers>] [--access-log] [--debug] [--no-compress] [--mercure]",
+		Usage: "[--domain <example.com>] [--root <path>] [--listen <addr>] [--worker /path/to/worker.php<,nb-workers>] [--watch <paths...>] [--access-log] [--debug] [--no-compress] [--mercure]",
 		Short: "Spins up a production-ready PHP server",
 		Long: `
 A simple but production-ready PHP server. Useful for quick deployments,
@@ -48,6 +48,7 @@ For more advanced use cases, see https://github.com/dunglas/frankenphp/blob/main
 			cmd.Flags().StringP("root", "r", "", "The path to the root of the site")
 			cmd.Flags().StringP("listen", "l", "", "The address to which to bind the listener")
 			cmd.Flags().StringArrayP("worker", "w", []string{}, "Worker script")
+			cmd.Flags().StringArrayP("watch", "", []string{}, "Directory to watch for file changes")
 			cmd.Flags().BoolP("access-log", "a", false, "Enable the access log")
 			cmd.Flags().BoolP("debug", "v", false, "Enable verbose debug logs")
 			cmd.Flags().BoolP("mercure", "m", false, "Enable the built-in Mercure.rocks hub")
@@ -73,6 +74,10 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 	if err != nil {
 		panic(err)
 	}
+	watch, err := fs.GetStringArray("watch")
+	if err != nil {
+		panic(err)
+	}
 
 	var workersOption []workerConfig
 	if len(workers) != 0 {
@@ -90,6 +95,7 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 
 			workersOption = append(workersOption, workerConfig{FileName: parts[0], Num: num})
 		}
+		workersOption[0].Watch = watch
 	}
 
 	if frankenphp.EmbeddedAppPath != "" {
@@ -122,7 +128,7 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 	}
 
 	const indexFile = "index.php"
-	extensions := []string{"php"}
+	extensions := []string{".php"}
 	tryFiles := []string{"{http.request.uri.path}", "{http.request.uri.path}/" + indexFile, indexFile}
 
 	rrs := true
@@ -173,7 +179,7 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 
 	// route to actually pass requests to PHP files;
 	// match only requests that are for PHP files
-	pathList := []string{}
+	var pathList []string
 	for _, ext := range extensions {
 		pathList = append(pathList, "*"+ext)
 	}
@@ -213,15 +219,30 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 			return caddy.ExitCodeFailedStartup, err
 		}
 
+		var (
+			encodings caddy.ModuleMap
+			prefer    []string
+		)
+		if brotli {
+			encodings = caddy.ModuleMap{
+				"zstd": caddyconfig.JSON(zstd.New(), nil),
+				"br":   caddyconfig.JSON(br.New(), nil),
+				"gzip": caddyconfig.JSON(gzip.New(), nil),
+			}
+			prefer = []string{"zstd", "br", "gzip"}
+		} else {
+			encodings = caddy.ModuleMap{
+				"zstd": caddyconfig.JSON(zstd.New(), nil),
+				"gzip": caddyconfig.JSON(gzip.New(), nil),
+			}
+			prefer = []string{"zstd", "gzip"}
+		}
+
 		encodeRoute := caddyhttp.Route{
 			MatcherSetsRaw: []caddy.ModuleMap{},
 			HandlersRaw: []json.RawMessage{caddyconfig.JSONModuleObject(encode.Encode{
-				EncodingsRaw: caddy.ModuleMap{
-					"zstd": caddyconfig.JSON(zstd.New(), nil),
-					"br":   caddyconfig.JSON(br.New(), nil),
-					"gzip": caddyconfig.JSON(gzip.New(), nil),
-				},
-				Prefer: []string{"zstd", "br", "gzip"},
+				EncodingsRaw: encodings,
+				Prefer:       prefer,
 			}, "handler", "encode", nil)},
 		}
 
@@ -295,12 +316,12 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 		Servers: map[string]*caddyhttp.Server{"php": server},
 	}
 
-	var false bool
+	var f bool
 	cfg := &caddy.Config{
 		Admin: &caddy.AdminConfig{
 			Disabled: true,
 			Config: &caddy.ConfigSettings{
-				Persist: &false,
+				Persist: &f,
 			},
 		},
 		AppsRaw: caddy.ModuleMap{
@@ -313,7 +334,7 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 		cfg.Logging = &caddy.Logging{
 			Logs: map[string]*caddy.CustomLog{
 				"default": {
-					BaseLog: caddy.BaseLog{Level: zap.DebugLevel.CapitalString()},
+					BaseLog: caddy.BaseLog{Level: zapcore.DebugLevel.CapitalString()},
 				},
 			},
 		}

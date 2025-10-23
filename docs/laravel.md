@@ -16,7 +16,7 @@ And enjoy!
 
 Alternatively, you can run your Laravel projects with FrankenPHP from your local machine:
 
-1. [Download the binary corresponding to your system](https://github.com/dunglas/frankenphp/releases)
+1. [Download the binary corresponding to your system](../README.md#standalone-binary)
 2. Add the following configuration to a file named `Caddyfile` in the root directory of your Laravel project:
 
     ```caddyfile
@@ -35,7 +35,7 @@ Alternatively, you can run your Laravel projects with FrankenPHP from your local
     }
     ```
 
-3. Start FrankenPHP from the root directory of your Laravel project: `./frankenphp run`
+3. Start FrankenPHP from the root directory of your Laravel project: `frankenphp run`
 
 ## Laravel Octane
 
@@ -64,12 +64,15 @@ The `octane:frankenphp` command can take the following options:
 * `--admin-port`: The port the admin server should be available on (default: `2019`)
 * `--workers`: The number of workers that should be available to handle requests (default: `auto`)
 * `--max-requests`: The number of requests to process before reloading the server (default: `500`)
-* `--caddyfile`: The path to the FrankenPHP `Caddyfile` file
+* `--caddyfile`: The path to the FrankenPHP `Caddyfile` file (default: [stubbed `Caddyfile` in Laravel Octane](https://github.com/laravel/octane/blob/2.x/src/Commands/stubs/Caddyfile))
 * `--https`: Enable HTTPS, HTTP/2, and HTTP/3, and automatically generate and renew certificates
 * `--http-redirect`: Enable HTTP to HTTPS redirection (only enabled if --https is passed)
 * `--watch`: Automatically reload the server when the application is modified
 * `--poll`: Use file system polling while watching in order to watch files over a network
-* `--log-level`: Log messages at or above the specified log level
+* `--log-level`: Log messages at or above the specified log level, using the native Caddy logger
+
+> [!TIP]
+> To get structured JSON logs (useful when using log analytics solutions), explicitly the pass `--log-level` option.
 
 Learn more about [Laravel Octane in its official documentation](https://laravel.com/docs/octane).
 
@@ -128,25 +131,25 @@ Follow these steps to package your Laravel app as a standalone binary for Linux:
 4. Populate caches:
 
     ```console
-    ./frankenphp php-cli artisan optimize
+    frankenphp php-cli artisan optimize
     ```
 
 5. Run database migrations (if any):
 
     ```console
-    ./frankenphp php-cli artisan migrate
+    frankenphp php-cli artisan migrate
     ````
 
 6. Generate app's secret key:
 
     ```console
-    ./frankenphp php-cli artisan key:generate
+    frankenphp php-cli artisan key:generate
     ```
 
 7. Start the server:
 
     ```console
-    ./frankenphp php-server
+    frankenphp php-server
     ```
 
 Your app is now ready!
@@ -170,10 +173,10 @@ To do so, [install Octane properly](#laravel-octane) and follow the steps descri
 Then, to start FrankenPHP in worker mode through Octane, run:
 
 ```console
-PATH="$PWD:$PATH" ./frankenphp php-cli artisan octane:frankenphp
+PATH="$PWD:$PATH" frankenphp php-cli artisan octane:frankenphp
 ```
 
-> ![CAUTION]
+> [!CAUTION]
 >
 > For the command to work, the standalone binary **must** be named `frankenphp`
 > because Octane needs a program named `frankenphp` available in the path.

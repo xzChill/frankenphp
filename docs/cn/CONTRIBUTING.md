@@ -29,7 +29,7 @@ docker run --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -p 8080:8080 -
 ## 运行测试套件
 
 ```console
-go test -race -v ./...
+go test -tags watcher -race -v ./...
 ```
 
 ## Caddy 模块
@@ -118,7 +118,7 @@ docker buildx bake -f docker-bake.hcl --pull --no-cache --push
     ```
 
 2. 将当前版本的 `frankenphp` 替换为 debug FrankenPHP 可执行文件
-3. 照常启动 FrankenPHP（或者，你可以直接使用 GDB 启动 FrankenPHP： `gdb --args ./frankenphp run`）
+3. 照常启动 FrankenPHP（或者，你可以直接使用 GDB 启动 FrankenPHP： `gdb --args frankenphp run`）
 4. 使用 GDB 附加到进程：
 
     ```console
@@ -171,8 +171,8 @@ docker buildx bake -f docker-bake.hcl --pull --no-cache --push
 8. 在容器中，可以使用 GDB 和以下：
 
     ```console
-    go test -c -ldflags=-w
-    gdb --args ./frankenphp.test -test.run ^MyTest$
+    go test -tags watcher -c -ldflags=-w
+    gdb --args frankenphp.test -test.run ^MyTest$
     ```
 
 9. 当错误修复后，恢复所有这些更改

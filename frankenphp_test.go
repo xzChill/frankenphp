@@ -7,6 +7,7 @@ package frankenphp_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,12 +30,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
 	"go.uber.org/zap/zaptest/observer"
 )
 
 type testOptions struct {
 	workerScript        string
+	watch               []string
 	nbWorkers           int
 	env                 map[string]string
 	nbParrallelRequests int
@@ -59,7 +63,7 @@ func runTest(t *testing.T, test func(func(http.ResponseWriter, *http.Request), *
 
 	initOpts := []frankenphp.Option{frankenphp.WithLogger(opts.logger)}
 	if opts.workerScript != "" {
-		initOpts = append(initOpts, frankenphp.WithWorkers(testDataDir+opts.workerScript, opts.nbWorkers, opts.env))
+		initOpts = append(initOpts, frankenphp.WithWorkers(testDataDir+opts.workerScript, opts.nbWorkers, opts.env, opts.watch))
 	}
 	initOpts = append(initOpts, opts.initOpts...)
 
@@ -246,6 +250,12 @@ func testResponseHeaders(t *testing.T, opts *testOptions) {
 		resp := w.Result()
 		body, _ := io.ReadAll(resp.Body)
 
+		if i%3 != 0 {
+			assert.Equal(t, i+100, resp.StatusCode)
+		} else {
+			assert.Equal(t, 200, resp.StatusCode)
+		}
+
 		assert.Contains(t, string(body), "'X-Powered-By' => 'PH")
 		assert.Contains(t, string(body), "'Foo' => 'bar',")
 		assert.Contains(t, string(body), "'Foo2' => 'bar2',")
@@ -404,7 +414,7 @@ func TestLog_worker(t *testing.T) {
 	testLog(t, &testOptions{workerScript: "log.php"})
 }
 func testLog(t *testing.T, opts *testOptions) {
-	logger, logs := observer.New(zap.InfoLevel)
+	logger, logs := observer.New(zapcore.InfoLevel)
 	opts.logger = zap.New(logger)
 
 	runTest(t, func(handler func(http.ResponseWriter, *http.Request), _ *httptest.Server, i int) {
@@ -424,7 +434,7 @@ func TestConnectionAbort_worker(t *testing.T) {
 func testConnectionAbort(t *testing.T, opts *testOptions) {
 	testFinish := func(finish string) {
 		t.Run(fmt.Sprintf("finish=%s", finish), func(t *testing.T) {
-			logger, logs := observer.New(zap.InfoLevel)
+			logger, logs := observer.New(zapcore.InfoLevel)
 			opts.logger = zap.New(logger)
 
 			runTest(t, func(handler func(http.ResponseWriter, *http.Request), _ *httptest.Server, i int) {
@@ -602,6 +612,45 @@ func testRequestHeaders(t *testing.T, opts *testOptions) {
 	}, opts)
 }
 
+func TestFailingWorker(t *testing.T) {
+	runTest(t, func(handler func(http.ResponseWriter, *http.Request), _ *httptest.Server, i int) {
+		req := httptest.NewRequest("GET", "http://example.com/failing-worker.php", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		resp := w.Result()
+		body, _ := io.ReadAll(resp.Body)
+		assert.Contains(t, string(body), "ok")
+	}, &testOptions{workerScript: "failing-worker.php"})
+}
+
+func TestEnv(t *testing.T) {
+	testEnv(t, &testOptions{})
+}
+func TestEnvWorker(t *testing.T) {
+	testEnv(t, &testOptions{workerScript: "test-env.php"})
+}
+func testEnv(t *testing.T, opts *testOptions) {
+	runTest(t, func(handler func(http.ResponseWriter, *http.Request), _ *httptest.Server, i int) {
+		req := httptest.NewRequest("GET", fmt.Sprintf("http://example.com/test-env.php?var=%d", i), nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		resp := w.Result()
+		body, _ := io.ReadAll(resp.Body)
+
+		// execute the script as regular php script
+		cmd := exec.Command("php", "testdata/test-env.php", strconv.Itoa(i))
+		stdoutStderr, err := cmd.CombinedOutput()
+		if err != nil {
+			// php is not installed or other issue, use the hardcoded output below:
+			stdoutStderr = []byte("Set MY_VAR successfully.\nMY_VAR = HelloWorld\nUnset MY_VAR successfully.\nMY_VAR is unset.\nMY_VAR set to empty successfully.\nMY_VAR = \nUnset NON_EXISTING_VAR successfully.\n")
+		}
+
+		assert.Equal(t, string(stdoutStderr), string(body))
+	}, opts)
+}
+
 func TestFileUpload_module(t *testing.T) { testFileUpload(t, &testOptions{}) }
 func TestFileUpload_worker(t *testing.T) {
 	testFileUpload(t, &testOptions{workerScript: "file-upload.php"})
@@ -638,7 +687,8 @@ func TestExecuteScriptCLI(t *testing.T) {
 	stdoutStderr, err := cmd.CombinedOutput()
 	assert.Error(t, err)
 
-	if exitError, ok := err.(*exec.ExitError); ok {
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
 		assert.Equal(t, 3, exitError.ExitCode())
 	}
 
@@ -840,4 +890,73 @@ func BenchmarkServerSuperGlobal(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		handler(w, req)
 	}
+}
+
+func TestRejectInvalidHeaders_module(t *testing.T) { testRejectInvalidHeaders(t, &testOptions{}) }
+func TestRejectInvalidHeaders_worker(t *testing.T) {
+	testRejectInvalidHeaders(t, &testOptions{workerScript: "headers.php"})
+}
+func testRejectInvalidHeaders(t *testing.T, opts *testOptions) {
+	invalidHeaders := [][]string{
+		{"Content-Length", "-1"},
+		{"Content-Length", "something"},
+	}
+	for _, header := range invalidHeaders {
+		runTest(t, func(handler func(http.ResponseWriter, *http.Request), _ *httptest.Server, _ int) {
+			req := httptest.NewRequest("GET", "http://example.com/headers.php", nil)
+			req.Header.Add(header[0], header[1])
+
+			w := httptest.NewRecorder()
+			handler(w, req)
+
+			resp := w.Result()
+			body, _ := io.ReadAll(resp.Body)
+
+			assert.Equal(t, 400, resp.StatusCode)
+			assert.Contains(t, string(body), "invalid")
+		}, opts)
+	}
+}
+
+// To run this fuzzing test use: go test -fuzz FuzzRequest
+// TODO: Cover more potential cases
+func FuzzRequest(f *testing.F) {
+	f.Add("hello world")
+	f.Add("😀😅🙃🤩🥲🤪😘😇😉🐘🧟")
+	f.Add("%00%11%%22%%33%%44%%55%%66%%77%%88%%99%%aa%%bb%%cc%%dd%%ee%%ff")
+	f.Add("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f")
+	f.Fuzz(func(t *testing.T, fuzzedString string) {
+		absPath, _ := filepath.Abs("./testdata/")
+		runTest(t, func(handler func(http.ResponseWriter, *http.Request), _ *httptest.Server, _ int) {
+			req := httptest.NewRequest("GET", "http://example.com/server-variable", nil)
+			req.URL = &url.URL{RawQuery: "test=" + fuzzedString, Path: "/server-variable.php/" + fuzzedString}
+			req.Header.Add(strings.Clone("Fuzzed"), strings.Clone(fuzzedString))
+			req.Header.Add(strings.Clone("Content-Type"), fuzzedString)
+
+			w := httptest.NewRecorder()
+			handler(w, req)
+
+			resp := w.Result()
+			body, _ := io.ReadAll(resp.Body)
+
+			// The response status must be 400 if the request path contains null bytes
+			if strings.Contains(req.URL.Path, "\x00") {
+				assert.Equal(t, 400, resp.StatusCode)
+				assert.Contains(t, string(body), "Invalid request path")
+				return
+			}
+
+			// The fuzzed string must be present in the path
+			assert.Contains(t, string(body), fmt.Sprintf("[PATH_INFO] => /%s", fuzzedString))
+			assert.Contains(t, string(body), fmt.Sprintf("[PATH_TRANSLATED] => %s", filepath.Join(absPath, fuzzedString)))
+
+			// The header should only be present if the fuzzed string is not empty
+			if len(fuzzedString) > 0 {
+				assert.Contains(t, string(body), fmt.Sprintf("[CONTENT_TYPE] => %s", fuzzedString))
+				assert.Contains(t, string(body), fmt.Sprintf("[HTTP_FUZZED] => %s", fuzzedString))
+			} else {
+				assert.NotContains(t, string(body), "[HTTP_FUZZED]")
+			}
+		}, &testOptions{workerScript: "request-headers.php"})
+	})
 }

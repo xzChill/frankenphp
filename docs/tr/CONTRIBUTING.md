@@ -29,7 +29,7 @@ Docker sürümü 23.0'dan düşükse, derleme dockerignore [pattern issue](https
 ## Test senaryolarını çalıştırma
 
 ```console
-go test -race -v ./...
+go test -tags watcher -race -v ./...
 ```
 
 ## Caddy modülü
@@ -118,7 +118,7 @@ docker buildx bake -f docker-bake.hcl --pull --no-cache --push
     ```
 
 2. Mevcut `frankenphp` sürümünüzü hata ayıklama FrankenPHP çalıştırılabilir dosyasıyla değiştirin
-3. FrankenPHP'yi her zamanki gibi başlatın (alternatif olarak FrankenPHP'yi doğrudan GDB ile başlatabilirsiniz: `gdb --args ./frankenphp run`)
+3. FrankenPHP'yi her zamanki gibi başlatın (alternatif olarak FrankenPHP'yi doğrudan GDB ile başlatabilirsiniz: `gdb --args frankenphp run`)
 4. GDB ile sürece bağlanın:
 
     ```console
@@ -171,8 +171,8 @@ docker buildx bake -f docker-bake.hcl --pull --no-cache --push
 8. Konteynerde GDB ve benzerlerini kullanabilirsiniz:
 
     ```console
-    go test -c -ldflags=-w
-    gdb --args ./frankenphp.test -test.run ^MyTest$
+    go test -tags watcher -c -ldflags=-w
+    gdb --args frankenphp.test -test.run ^MyTest$
     ```
 
 9. Hata düzeltildiğinde, tüm bu değişiklikleri geri alın

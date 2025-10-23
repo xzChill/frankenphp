@@ -15,6 +15,8 @@ ENV PHPIZE_DEPS="\
 	pkgconfig \
 	re2c"
 
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+
 RUN apk add --no-cache \
 	$PHPIZE_DEPS \
 	argon2-dev \
@@ -29,9 +31,13 @@ RUN apk add --no-cache \
 	zlib-dev \
 	bison \
 	nss-tools \
+	# file watcher
+	libstdc++ \
+	linux-headers \
 	# Dev tools \
 	git \
 	clang \
+	cmake \
 	llvm \
 	gdb \
 	valgrind \
@@ -57,6 +63,14 @@ RUN git clone --branch=PHP-8.3 https://github.com/php/php-src.git . && \
 	echo "zend_extension=opcache.so" >> /usr/local/lib/php.ini && \
 	echo "opcache.enable=1" >> /usr/local/lib/php.ini && \
 	php --version
+
+# Install e-dant/watcher (necessary for file watching)
+ARG EDANT_WATCHER_VERSION=release
+WORKDIR /usr/local/src/watcher
+RUN git clone --branch=$EDANT_WATCHER_VERSION https://github.com/e-dant/watcher . && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+	cmake --build build/ && \
+	cmake --install build
 
 WORKDIR /go/src/app
 COPY . .

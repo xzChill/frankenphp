@@ -34,18 +34,28 @@ Go to `https://localhost`, and enjoy!
 ### Standalone Binary
 
 If you prefer not to use Docker, we provide standalone FrankenPHP binaries for Linux and macOS
-containing [PHP 8.3](https://www.php.net/releases/8.3/en.php) and most popular PHP extensions: [Download FrankenPHP](https://github.com/dunglas/frankenphp/releases)
+containing [PHP 8.3](https://www.php.net/releases/8.3/en.php) and most popular PHP extensions.
+
+On Windows, use [WSL](https://learn.microsoft.com/windows/wsl/) to run FrankenPHP.
+
+[Download FrankenPHP](https://github.com/dunglas/frankenphp/releases) or copy this line into your
+terminal to automatically install the version appropriate for your platform:
+
+```console
+curl https://frankenphp.dev/install.sh | sh
+mv frankenphp /usr/local/bin/
+```
 
 To serve the content of the current directory, run:
 
 ```console
-./frankenphp php-server
+frankenphp php-server
 ```
 
 You can also run command-line scripts with:
 
 ```console
-./frankenphp php-cli /path/to/your/script.php
+frankenphp php-cli /path/to/your/script.php
 ```
 
 ## Docs
@@ -55,7 +65,8 @@ You can also run command-line scripts with:
 * [Real-time](https://frankenphp.dev/docs/mercure/)
 * [Configuration](https://frankenphp.dev/docs/config/)
 * [Docker images](https://frankenphp.dev/docs/docker/)
-* [Deploy in production](docs/production.md)
+* [Deploy in production](https://frankenphp.dev/docs/production/)
+* [Performance optimization](https://frankenphp.dev/docs/performance/)
 * [Create **standalone**, self-executable PHP apps](https://frankenphp.dev/docs/embed/)
 * [Create static binaries](https://frankenphp.dev/docs/static/)
 * [Compile from sources](https://frankenphp.dev/docs/compile/)
@@ -68,7 +79,7 @@ You can also run command-line scripts with:
 ## Examples and Skeletons
 
 * [Symfony](https://github.com/dunglas/symfony-docker)
-* [API Platform](https://api-platform.com/docs/distribution/)
+* [API Platform](https://api-platform.com/docs/symfony)
 * [Laravel](https://frankenphp.dev/docs/laravel/)
 * [Sulu](https://sulu.io/blog/running-sulu-with-frankenphp)
 * [WordPress](https://github.com/StephenMiracle/frankenwp)

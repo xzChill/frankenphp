@@ -15,6 +15,8 @@ ENV PHPIZE_DEPS="\
 	pkg-config \
 	re2c"
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # hadolint ignore=DL3009
 RUN apt-get update && \
 	apt-get -y --no-install-recommends install \
@@ -34,6 +36,7 @@ RUN apt-get update && \
 	# Dev tools \
 	git \
 	clang \
+	cmake \
 	llvm \
 	gdb \
 	valgrind \
@@ -63,11 +66,19 @@ RUN git clone --branch=PHP-8.3 https://github.com/php/php-src.git . && \
 	echo "opcache.enable=1" >> /usr/local/lib/php.ini && \
 	php --version
 
+# Install e-dant/watcher (necessary for file watching)
+ARG EDANT_WATCHER_VERSION=release
+WORKDIR /usr/local/src/watcher
+RUN git clone --branch=$EDANT_WATCHER_VERSION https://github.com/e-dant/watcher . && \
+	cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+	cmake --build build/ && \
+	cmake --install build
+
 WORKDIR /go/src/app
 COPY . .
 
 WORKDIR /go/src/app/caddy/frankenphp
-RUN go build -buildvcs=false
+RUN go build -buildvcs=false -tags 'nobadger,nomysql,nopgx'
 
 WORKDIR /go/src/app
 CMD [ "zsh" ]

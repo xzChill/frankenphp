@@ -6,9 +6,12 @@ package caddy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
@@ -42,6 +45,8 @@ var mainPHPInterpreterKey mainPHPinterpreterKeyType
 
 var phpInterpreter = caddy.NewUsagePool()
 
+var metrics = frankenphp.NewPrometheusMetrics(prometheus.DefaultRegisterer)
+
 type phpInterpreterDestructor struct{}
 
 func (phpInterpreterDestructor) Destruct() error {
@@ -57,6 +62,8 @@ type workerConfig struct {
 	Num int `json:"num,omitempty"`
 	// Env sets an extra environment variable to the given value. Can be specified more than once for multiple environment variables.
 	Env map[string]string `json:"env,omitempty"`
+	// Directories to watch for file changes
+	Watch []string `json:"watch,omitempty"`
 }
 
 type FrankenPHPApp struct {
@@ -67,10 +74,10 @@ type FrankenPHPApp struct {
 }
 
 // CaddyModule returns the Caddy module information.
-func (a FrankenPHPApp) CaddyModule() caddy.ModuleInfo {
+func (f FrankenPHPApp) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "frankenphp",
-		New: func() caddy.Module { return &a },
+		New: func() caddy.Module { return &f },
 	}
 }
 
@@ -78,9 +85,9 @@ func (f *FrankenPHPApp) Start() error {
 	repl := caddy.NewReplacer()
 	logger := caddy.Log()
 
-	opts := []frankenphp.Option{frankenphp.WithNumThreads(f.NumThreads), frankenphp.WithLogger(logger)}
+	opts := []frankenphp.Option{frankenphp.WithNumThreads(f.NumThreads), frankenphp.WithLogger(logger), frankenphp.WithMetrics(metrics)}
 	for _, w := range f.Workers {
-		opts = append(opts, frankenphp.WithWorkers(repl.ReplaceKnown(w.FileName, ""), w.Num, w.Env))
+		opts = append(opts, frankenphp.WithWorkers(repl.ReplaceKnown(w.FileName, ""), w.Num, w.Env, w.Watch))
 	}
 
 	_, loaded, err := phpInterpreter.LoadOrNew(mainPHPInterpreterKey, func() (caddy.Destructor, error) {
@@ -104,8 +111,11 @@ func (f *FrankenPHPApp) Start() error {
 	return nil
 }
 
-func (*FrankenPHPApp) Stop() error {
+func (f *FrankenPHPApp) Stop() error {
 	caddy.Log().Info("FrankenPHP stopped 🐘")
+	// reset configuration so it doesn't bleed into later tests
+	f.Workers = nil
+	f.NumThreads = 0
 
 	return nil
 }
@@ -126,7 +136,6 @@ func (f *FrankenPHPApp) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 
 				f.NumThreads = v
-
 			case "worker":
 				wc := workerConfig{}
 				if d.NextArg() {
@@ -170,10 +179,17 @@ func (f *FrankenPHPApp) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 							wc.Env = make(map[string]string)
 						}
 						wc.Env[args[0]] = args[1]
+					case "watch":
+						if !d.NextArg() {
+							// the default if the watch directory is left empty:
+							wc.Watch = append(wc.Watch, "./**/*.{php,yaml,yml,twig,env}")
+						} else {
+							wc.Watch = append(wc.Watch, d.Val())
+						}
 					}
 
 					if wc.FileName == "" {
-						return errors.New(`The "file" argument must be specified`)
+						return errors.New(`the "file" argument must be specified`)
 					}
 
 					if frankenphp.EmbeddedAppPath != "" && filepath.IsLocal(wc.FileName) {
@@ -212,8 +228,10 @@ type FrankenPHPModule struct {
 	// Env sets an extra environment variable to the given value. Can be specified more than once for multiple environment variables.
 	Env map[string]string `json:"env,omitempty"`
 
-	preparedEnv frankenphp.PreparedEnv
-	logger      *zap.Logger
+	resolvedDocumentRoot        string
+	preparedEnv                 frankenphp.PreparedEnv
+	preparedEnvNeedsReplacement bool
+	logger                      *zap.Logger
 }
 
 // CaddyModule returns the Caddy module information.
@@ -251,11 +269,41 @@ func (f *FrankenPHPModule) Provision(ctx caddy.Context) error {
 		f.ResolveRootSymlink = &rrs
 	}
 
+	if !needReplacement(f.Root) {
+		root, err := filepath.Abs(f.Root)
+		if err != nil {
+			return fmt.Errorf("unable to make the root path absolute: %w", err)
+		}
+		f.resolvedDocumentRoot = root
+
+		if *f.ResolveRootSymlink {
+			root, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				return fmt.Errorf("unable to resolve root symlink: %w", err)
+			}
+
+			f.resolvedDocumentRoot = root
+		}
+	}
+
 	if f.preparedEnv == nil {
 		f.preparedEnv = frankenphp.PrepareEnv(f.Env)
+
+		for _, e := range f.preparedEnv {
+			if needReplacement(e) {
+				f.preparedEnvNeedsReplacement = true
+
+				break
+			}
+		}
 	}
 
 	return nil
+}
+
+// needReplacement checks if a string contains placeholders.
+func needReplacement(s string) bool {
+	return strings.Contains(s, "{") || strings.Contains(s, "}")
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
@@ -264,17 +312,26 @@ func (f FrankenPHPModule) ServeHTTP(w http.ResponseWriter, r *http.Request, _ ca
 	origReq := r.Context().Value(caddyhttp.OriginalRequestCtxKey).(http.Request)
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 
-	documentRoot := repl.ReplaceKnown(f.Root, "")
+	var documentRootOption frankenphp.RequestOption
+	if f.resolvedDocumentRoot == "" {
+		documentRootOption = frankenphp.WithRequestDocumentRoot(repl.ReplaceKnown(f.Root, ""), *f.ResolveRootSymlink)
+	} else {
+		documentRootOption = frankenphp.WithRequestResolvedDocumentRoot(f.resolvedDocumentRoot)
+	}
 
 	env := make(map[string]string, len(f.preparedEnv)+1)
 	env["REQUEST_URI\x00"] = origReq.URL.RequestURI()
 	for k, v := range f.preparedEnv {
-		env[k] = repl.ReplaceKnown(v, "")
+		if f.preparedEnvNeedsReplacement {
+			env[k] = repl.ReplaceKnown(v, "")
+		} else {
+			env[k] = v
+		}
 	}
 
 	fr, err := frankenphp.NewRequestWithContext(
 		r,
-		frankenphp.WithRequestDocumentRoot(documentRoot, *f.ResolveRootSymlink),
+		documentRootOption,
 		frankenphp.WithRequestSplitPath(f.SplitPath),
 		frankenphp.WithRequestPreparedEnv(env),
 	)
@@ -316,19 +373,19 @@ func (f *FrankenPHPModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				f.preparedEnv[args[0]+"\x00"] = args[1]
 
 			case "resolve_root_symlink":
+				if !d.NextArg() {
+					continue
+				}
+
+				v, err := strconv.ParseBool(d.Val())
+				if err != nil {
+					return err
+				}
 				if d.NextArg() {
-					if v, err := strconv.ParseBool(d.Val()); err == nil {
-						f.ResolveRootSymlink = &v
-
-						if d.NextArg() {
-							return d.ArgErr()
-						}
-					}
-
 					return d.ArgErr()
 				}
-				rrs := true
-				f.ResolveRootSymlink = &rrs
+
+				f.ResolveRootSymlink = &v
 			}
 		}
 	}
@@ -535,7 +592,7 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 
 	// route to actually pass requests to PHP files;
 	// match only requests that are for PHP files
-	pathList := []string{}
+	var pathList []string
 	for _, ext := range extensions {
 		pathList = append(pathList, "*"+ext)
 	}

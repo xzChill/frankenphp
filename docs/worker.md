@@ -22,11 +22,18 @@ docker run \
 Use the `--worker` option of the `php-server` command to serve the content of the current directory using a worker:
 
 ```console
-./frankenphp php-server --worker /path/to/your/worker/script.php
+frankenphp php-server --worker /path/to/your/worker/script.php
 ```
 
-If your PHP app is [embeded in the binary](embed.md), you can add a custom `Caddyfile` in the root directory of the app.
+If your PHP app is [embedded in the binary](embed.md), you can add a custom `Caddyfile` in the root directory of the app.
 It will be used automatically.
+
+It's also possible to [restart the worker on file changes](config.md#watching-for-file-changes) with the `--watch` option.
+The following command will trigger a restart if any file ending in `.php` in the `/path/to/your/app/` directory or subdirectories is modified:
+
+```console
+frankenphp php-server --worker /path/to/your/worker/script.php --watch "/path/to/your/app/**/*.php"
+```
 
 ## Symfony Runtime
 
@@ -120,6 +127,14 @@ As PHP was not originally designed for long-running processes, there are still m
 A workaround to using this type of code in worker mode is to restart the worker script after processing a certain number of requests:
 
 The previous worker snippet allows configuring a maximum number of request to handle by setting an environment variable named `MAX_REQUESTS`.
+
+### Worker Failures
+
+If a worker script crashes with a non-zero exit code, FrankenPHP will restart it with an exponential backoff strategy.
+If the worker script stays up longer than the last backoff * 2,
+it will not penalize the worker script and restart it again.
+However, if the worker script continues to fail with a non-zero exit code in a short period of time
+(for example, having a typo in a script), FrankenPHP will crash with the error: `too many consecutive failures`.
 
 ## Superglobals Behavior
 

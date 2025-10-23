@@ -52,7 +52,7 @@ FrankenPHP is built on top of Caddy, and all [Caddy modules](https://caddyserver
 The easiest way to install custom Caddy modules is to use [xcaddy](https://github.com/caddyserver/xcaddy):
 
 ```dockerfile
-FROM dunglas/frankenphp:latest-builder AS builder
+FROM dunglas/frankenphp:builder AS builder
 
 # Copy xcaddy in the builder image
 COPY --from=caddy:builder /usr/bin/xcaddy /usr/bin/xcaddy
@@ -63,8 +63,8 @@ RUN xcaddy build \
 	--output /usr/local/bin/frankenphp \
 	--with github.com/dunglas/frankenphp=./ \
 	--with github.com/dunglas/frankenphp/caddy=./caddy/ \
-	# Mercure and Vulcain are included in the official build, but feel free to remove them
 	--with github.com/dunglas/caddy-cbrotli \
+	# Mercure and Vulcain are included in the official build, but feel free to remove them
 	--with github.com/dunglas/mercure/caddy \
 	--with github.com/dunglas/vulcain/caddy
 	# Add extra Caddy modules here
@@ -103,7 +103,7 @@ To develop easily with FrankenPHP, mount the directory from your host containing
 docker run -v $PWD:/app/public -p 80:80 -p 443:443 -p 443:443/udp --tty my-php-app
 ```
 
-> ![TIP]
+> [!TIP]
 >
 > The `--tty` option allows to have nice human-readable logs instead of JSON logs.
 

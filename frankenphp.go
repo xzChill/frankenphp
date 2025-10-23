@@ -34,34 +34,33 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
-	"runtime/cgo"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/maypok86/otter"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	// debug on Linux
 	//_ "github.com/ianlancetaylor/cgosymbolizer"
 )
 
 type contextKeyStruct struct{}
-type handleKeyStruct struct{}
 
 var contextKey = contextKeyStruct{}
-var handleKey = handleKeyStruct{}
 
 var (
 	InvalidRequestError         = errors.New("not a FrankenPHP request")
-	AlreaydStartedError         = errors.New("FrankenPHP is already started")
+	AlreadyStartedError         = errors.New("FrankenPHP is already started")
 	InvalidPHPVersionError      = errors.New("FrankenPHP is only compatible with PHP 8.2+")
-	ZendSignalsError            = errors.New("Zend Signals are enabled, recompile PHP with --disable-zend-signals")
 	NotEnoughThreads            = errors.New("the number of threads must be superior to the number of workers")
 	MainThreadCreationError     = errors.New("error creating the main thread")
 	RequestContextCreationError = errors.New("error during request context creation")
-	RequestStartupError         = errors.New("error during PHP request startup")
 	ScriptExecutionError        = errors.New("error during PHP script execution")
 
 	requestChan chan *http.Request
@@ -70,6 +69,8 @@ var (
 
 	loggerMu sync.RWMutex
 	logger   *zap.Logger
+
+	metrics Metrics = nullMetrics{}
 )
 
 type syslogLevel int
@@ -124,8 +125,8 @@ type FrankenPHPContext struct {
 	responseWriter http.ResponseWriter
 	exitStatus     C.int
 
-	done                 chan interface{}
-	currentWorkerRequest cgo.Handle
+	done      chan interface{}
+	startedAt time.Time
 }
 
 func clientHasClosed(r *http.Request) bool {
@@ -189,7 +190,6 @@ func NewRequestWithContext(r *http.Request, opts ...RequestOption) (*http.Reques
 	fc.scriptFilename = sanitizedPathJoin(fc.documentRoot, fc.scriptName)
 
 	c := context.WithValue(r.Context(), contextKey, fc)
-	c = context.WithValue(c, handleKey, Handles())
 
 	return r.WithContext(c), nil
 }
@@ -241,11 +241,49 @@ func Config() PHPConfig {
 	}
 }
 
+// MaxThreads is internally used during tests. It is written to, but never read and may go away in the future.
+var MaxThreads int
+
+func calculateMaxThreads(opt *opt) error {
+	maxProcs := runtime.GOMAXPROCS(0) * 2
+
+	var numWorkers int
+	for i, w := range opt.workers {
+		if w.num <= 0 {
+			// https://github.com/dunglas/frankenphp/issues/126
+			opt.workers[i].num = maxProcs
+		}
+		metrics.TotalWorkers(w.fileName, w.num)
+
+		numWorkers += opt.workers[i].num
+	}
+
+	if opt.numThreads <= 0 {
+		if numWorkers >= maxProcs {
+			// Start at least as many threads as workers, and keep a free thread to handle requests in non-worker mode
+			opt.numThreads = numWorkers + 1
+		} else {
+			opt.numThreads = maxProcs
+		}
+	} else if opt.numThreads <= numWorkers {
+		return NotEnoughThreads
+	}
+
+	metrics.TotalThreads(opt.numThreads)
+	MaxThreads = opt.numThreads
+
+	return nil
+}
+
 // Init starts the PHP runtime and the configured workers.
 func Init(options ...Option) error {
 	if requestChan != nil {
-		return AlreaydStartedError
+		return AlreadyStartedError
 	}
+
+	// Ignore all SIGPIPE signals to prevent weird issues with systemd: https://github.com/dunglas/frankenphp/issues/1020
+	// Docker/Moby has a similar hack: https://github.com/moby/moby/blob/d828b032a87606ae34267e349bf7f7ccb1f6495a/cmd/dockerd/docker.go#L87-L90
+	signal.Ignore(syscall.SIGPIPE)
 
 	opt := &opt{}
 	for _, o := range options {
@@ -269,27 +307,13 @@ func Init(options ...Option) error {
 		loggerMu.Unlock()
 	}
 
-	maxProcs := runtime.GOMAXPROCS(0)
-
-	var numWorkers int
-	for i, w := range opt.workers {
-		if w.num <= 0 {
-			// https://github.com/dunglas/frankenphp/issues/126
-			opt.workers[i].num = maxProcs * 2
-		}
-
-		numWorkers += opt.workers[i].num
+	if opt.metrics != nil {
+		metrics = opt.metrics
 	}
 
-	if opt.numThreads <= 0 {
-		if numWorkers >= maxProcs {
-			// Start at least as many threads as workers, and keep a free thread to handle requests in non-worker mode
-			opt.numThreads = numWorkers + 1
-		} else {
-			opt.numThreads = maxProcs
-		}
-	} else if opt.numThreads <= numWorkers {
-		return NotEnoughThreads
+	err := calculateMaxThreads(opt)
+	if err != nil {
+		return err
 	}
 
 	config := Config()
@@ -309,7 +333,8 @@ func Init(options ...Option) error {
 
 	shutdownWG.Add(1)
 	done = make(chan struct{})
-	requestChan = make(chan *http.Request)
+	requestChan = make(chan *http.Request, opt.numThreads)
+	initPHPThreads(opt.numThreads)
 
 	if C.frankenphp_init(C.int(opt.numThreads)) != 0 {
 		return MainThreadCreationError
@@ -319,9 +344,17 @@ func Init(options ...Option) error {
 		return err
 	}
 
-	logger.Info("FrankenPHP started 🐘", zap.String("php_version", Version().Version), zap.Int("num_threads", opt.numThreads))
+	if err := restartWorkersOnFileChanges(opt.workers); err != nil {
+		return err
+	}
+
+	if c := logger.Check(zapcore.InfoLevel, "FrankenPHP started 🐘"); c != nil {
+		c.Write(zap.String("php_version", Version().Version), zap.Int("num_threads", opt.numThreads))
+	}
 	if EmbeddedAppPath != "" {
-		logger.Info("embedded PHP app 📦", zap.String("path", EmbeddedAppPath))
+		if c := logger.Check(zapcore.InfoLevel, "embedded PHP app 📦"); c != nil {
+			c.Write(zap.String("path", EmbeddedAppPath))
+		}
 	}
 
 	return nil
@@ -329,17 +362,14 @@ func Init(options ...Option) error {
 
 // Shutdown stops the workers and the PHP runtime.
 func Shutdown() {
-	stopWorkers()
-	close(done)
-	shutdownWG.Wait()
+	drainWorkers()
+	drainThreads()
+	metrics.Shutdown()
 	requestChan = nil
-
-	// Always reset the WaitGroup to ensure we're in a clean state
-	workersReadyWG = sync.WaitGroup{}
 
 	// Remove the installed app
 	if EmbeddedAppPath != "" {
-		os.RemoveAll(EmbeddedAppPath)
+		_ = os.RemoveAll(EmbeddedAppPath)
 	}
 
 	logger.Debug("FrankenPHP shut down")
@@ -350,6 +380,12 @@ func go_shutdown() {
 	shutdownWG.Done()
 }
 
+func drainThreads() {
+	close(done)
+	shutdownWG.Wait()
+	phpThreads = nil
+}
+
 func getLogger() *zap.Logger {
 	loggerMu.RLock()
 	defer loggerMu.RUnlock()
@@ -357,7 +393,7 @@ func getLogger() *zap.Logger {
 	return logger
 }
 
-func updateServerContext(request *http.Request, create bool, mrh C.uintptr_t) error {
+func updateServerContext(thread *phpThread, request *http.Request, create bool, isWorkerRequest bool) error {
 	fc, ok := FromContext(request.Context())
 	if !ok {
 		return InvalidRequestError
@@ -366,20 +402,20 @@ func updateServerContext(request *http.Request, create bool, mrh C.uintptr_t) er
 	authUser, authPassword, ok := request.BasicAuth()
 	var cAuthUser, cAuthPassword *C.char
 	if ok && authPassword != "" {
-		cAuthPassword = C.CString(authPassword)
+		cAuthPassword = thread.pinCString(authPassword)
 	}
 	if ok && authUser != "" {
-		cAuthUser = C.CString(authUser)
+		cAuthUser = thread.pinCString(authUser)
 	}
 
-	cMethod := C.CString(request.Method)
-	cQueryString := C.CString(request.URL.RawQuery)
+	cMethod := thread.pinCString(request.Method)
+	cQueryString := thread.pinCString(request.URL.RawQuery)
 	contentLengthStr := request.Header.Get("Content-Length")
 	contentLength := 0
 	if contentLengthStr != "" {
 		var err error
 		contentLength, err = strconv.Atoi(contentLengthStr)
-		if err != nil {
+		if err != nil || contentLength < 0 {
 			return fmt.Errorf("invalid Content-Length header: %w", err)
 		}
 	}
@@ -387,7 +423,7 @@ func updateServerContext(request *http.Request, create bool, mrh C.uintptr_t) er
 	contentType := request.Header.Get("Content-Type")
 	var cContentType *C.char
 	if contentType != "" {
-		cContentType = C.CString(contentType)
+		cContentType = thread.pinCString(contentType)
 	}
 
 	// compliance with the CGI specification requires that
@@ -395,25 +431,16 @@ func updateServerContext(request *http.Request, create bool, mrh C.uintptr_t) er
 	// Info: https://www.ietf.org/rfc/rfc3875 Page 14
 	var cPathTranslated *C.char
 	if fc.pathInfo != "" {
-		cPathTranslated = C.CString(sanitizedPathJoin(fc.documentRoot, fc.pathInfo)) // Info: http://www.oreilly.com/openbook/cgi/ch02_04.html
+		cPathTranslated = thread.pinCString(sanitizedPathJoin(fc.documentRoot, fc.pathInfo)) // Info: http://www.oreilly.com/openbook/cgi/ch02_04.html
 	}
 
-	cRequestUri := C.CString(request.URL.RequestURI())
-
-	var rh cgo.Handle
-	if fc.responseWriter == nil {
-		h := cgo.NewHandle(request)
-		request.Context().Value(handleKey).(*handleList).AddHandle(h)
-		mrh = C.uintptr_t(h)
-	} else {
-		rh = cgo.NewHandle(request)
-		request.Context().Value(handleKey).(*handleList).AddHandle(rh)
-	}
+	cRequestUri := thread.pinCString(request.URL.RequestURI())
+	isBootingAWorkerScript := fc.responseWriter == nil
 
 	ret := C.frankenphp_update_server_context(
 		C.bool(create),
-		C.uintptr_t(rh),
-		mrh,
+		C.bool(isWorkerRequest || isBootingAWorkerScript),
+		C.bool(!isBootingAWorkerScript),
 
 		cMethod,
 		cQueryString,
@@ -435,6 +462,10 @@ func updateServerContext(request *http.Request, create bool, mrh C.uintptr_t) er
 
 // ServeHTTP executes a PHP script according to the given context.
 func ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) error {
+	if !requestIsValid(request, responseWriter) {
+		return nil
+	}
+
 	shutdownWG.Add(1)
 	defer shutdownWG.Done()
 
@@ -444,33 +475,127 @@ func ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) error 
 	}
 
 	fc.responseWriter = responseWriter
+	fc.startedAt = time.Now()
 
-	rc := requestChan
+	isWorker := fc.responseWriter == nil
+
 	// Detect if a worker is available to handle this request
-	if nil != fc.responseWriter {
-		if v, ok := workersRequestChans.Load(fc.scriptFilename); ok {
-			rc = v.(chan *http.Request)
+	if !isWorker {
+		if worker, ok := workers[fc.scriptFilename]; ok {
+			metrics.StartWorkerRequest(fc.scriptFilename)
+			worker.handleRequest(request)
+			<-fc.done
+			metrics.StopWorkerRequest(fc.scriptFilename, time.Since(fc.startedAt))
+			return nil
+		} else {
+			metrics.StartRequest()
 		}
 	}
 
 	select {
 	case <-done:
-	case rc <- request:
+	case requestChan <- request:
 		<-fc.done
+	}
+
+	if !isWorker {
+		metrics.StopRequest()
 	}
 
 	return nil
 }
 
+//export go_putenv
+func go_putenv(str *C.char, length C.int) C.bool {
+	// Create a byte slice from C string with a specified length
+	s := C.GoBytes(unsafe.Pointer(str), length)
+
+	// Convert byte slice to string
+	envString := string(s)
+
+	// Check if '=' is present in the string
+	if key, val, found := strings.Cut(envString, "="); found {
+		if os.Setenv(key, val) != nil {
+			return false // Failure
+		}
+	} else {
+		// No '=', unset the environment variable
+		if os.Unsetenv(envString) != nil {
+			return false // Failure
+		}
+	}
+
+	return true // Success
+}
+
+//export go_getfullenv
+func go_getfullenv(threadIndex C.uintptr_t) (*C.go_string, C.size_t) {
+	thread := phpThreads[threadIndex]
+
+	env := os.Environ()
+	goStrings := make([]C.go_string, len(env)*2)
+
+	for i, envVar := range env {
+		key, val, _ := strings.Cut(envVar, "=")
+		k := unsafe.StringData(key)
+		v := unsafe.StringData(val)
+		thread.Pin(k)
+		thread.Pin(v)
+
+		goStrings[i*2] = C.go_string{C.size_t(len(key)), (*C.char)(unsafe.Pointer(k))}
+		goStrings[i*2+1] = C.go_string{C.size_t(len(val)), (*C.char)(unsafe.Pointer(v))}
+	}
+
+	value := unsafe.SliceData(goStrings)
+	thread.Pin(value)
+
+	return value, C.size_t(len(env))
+}
+
+//export go_getenv
+func go_getenv(threadIndex C.uintptr_t, name *C.go_string) (C.bool, *C.go_string) {
+	thread := phpThreads[threadIndex]
+
+	// Create a byte slice from C string with a specified length
+	envName := C.GoStringN(name.data, C.int(name.len))
+
+	// Get the environment variable value
+	envValue, exists := os.LookupEnv(envName)
+	if !exists {
+		// Environment variable does not exist
+		return false, nil // Return 0 to indicate failure
+	}
+
+	// Convert Go string to C string
+	val := unsafe.StringData(envValue)
+	thread.Pin(val)
+	value := &C.go_string{C.size_t(len(envValue)), (*C.char)(unsafe.Pointer(val))}
+	thread.Pin(value)
+
+	return true, value // Return 1 to indicate success
+}
+
+//export go_sapi_getenv
+func go_sapi_getenv(threadIndex C.uintptr_t, name *C.go_string) *C.char {
+	envName := C.GoStringN(name.data, C.int(name.len))
+
+	envValue, exists := os.LookupEnv(envName)
+	if !exists {
+		return nil
+	}
+
+	return phpThreads[threadIndex].pinCString(envValue)
+}
+
 //export go_handle_request
-func go_handle_request() bool {
+func go_handle_request(threadIndex C.uintptr_t) bool {
 	select {
 	case <-done:
 		return false
 
 	case r := <-requestChan:
-		h := cgo.NewHandle(r)
-		r.Context().Value(handleKey).(*handleList).AddHandle(h)
+		thread := phpThreads[threadIndex]
+		thread.mainRequest = r
 
 		fc, ok := FromContext(r.Context())
 		if !ok {
@@ -478,11 +603,13 @@ func go_handle_request() bool {
 		}
 		defer func() {
 			maybeCloseContext(fc)
-			r.Context().Value(handleKey).(*handleList).FreeAll()
+			thread.mainRequest = nil
+			thread.Unpin()
 		}()
 
-		if err := updateServerContext(r, true, 0); err != nil {
-			panic(err)
+		if err := updateServerContext(thread, r, true, false); err != nil {
+			rejectRequest(fc.responseWriter, err.Error())
+			return true
 		}
 
 		// scriptFilename is freed in frankenphp_execute_script()
@@ -502,8 +629,8 @@ func maybeCloseContext(fc *FrankenPHPContext) {
 }
 
 //export go_ub_write
-func go_ub_write(rh C.uintptr_t, cBuf *C.char, length C.int) (C.size_t, C.bool) {
-	r := cgo.Handle(rh).Value().(*http.Request)
+func go_ub_write(threadIndex C.uintptr_t, cBuf *C.char, length C.int) (C.size_t, C.bool) {
+	r := phpThreads[threadIndex].getActiveRequest()
 	fc, _ := FromContext(r.Context())
 
 	var writer io.Writer
@@ -517,7 +644,9 @@ func go_ub_write(rh C.uintptr_t, cBuf *C.char, length C.int) (C.size_t, C.bool) 
 
 	i, e := writer.Write(unsafe.Slice((*byte)(unsafe.Pointer(cBuf)), length))
 	if e != nil {
-		fc.logger.Error("write error", zap.Error(e))
+		if c := fc.logger.Check(zapcore.ErrorLevel, "write error"); c != nil {
+			c.Write(zap.Error(e))
+		}
 	}
 
 	if fc.responseWriter == nil {
@@ -538,105 +667,31 @@ var headerKeyCache = func() otter.Cache[string, string] {
 	return c
 }()
 
-//export go_register_variables
-func go_register_variables(rh C.uintptr_t, trackVarsArray *C.zval) {
-	r := cgo.Handle(rh).Value().(*http.Request)
-	fc := r.Context().Value(contextKey).(*FrankenPHPContext)
-
-	p := &runtime.Pinner{}
-
-	dynamicVariables := make([]C.php_variable, len(fc.env)+len(r.Header))
-
-	var l int
-
-	// Add all HTTP headers to env variables
-	for field, val := range r.Header {
-		k, ok := headerKeyCache.Get(field)
-		if !ok {
-			k = "HTTP_" + headerNameReplacer.Replace(strings.ToUpper(field)) + "\x00"
-			headerKeyCache.SetIfAbsent(field, k)
-		}
-
-		if _, ok := fc.env[k]; ok {
-			continue
-		}
-
-		v := strings.Join(val, ", ")
-
-		kData := unsafe.StringData(k)
-		vData := unsafe.StringData(v)
-
-		p.Pin(kData)
-		p.Pin(vData)
-
-		dynamicVariables[l]._var = (*C.char)(unsafe.Pointer(kData))
-		dynamicVariables[l].data_len = C.size_t(len(v))
-		dynamicVariables[l].data = (*C.char)(unsafe.Pointer(vData))
-
-		l++
-	}
-
-	for k, v := range fc.env {
-		if _, ok := knownServerKeys[k]; ok {
-			fmt.Printf("in knownServerKeys\n")
-		}
-		
-		if _, ok := knownServerKeys[k]; ok {
-			continue
-		}
-
-		kData := unsafe.StringData(k)
-		vData := unsafe.Pointer(unsafe.StringData(v))
-
-		p.Pin(kData)
-		p.Pin(vData)
-
-		dynamicVariables[l]._var = (*C.char)(unsafe.Pointer(kData))
-		dynamicVariables[l].data_len = C.size_t(len(v))
-		dynamicVariables[l].data = (*C.char)(unsafe.Pointer(vData))
-
-		l++
-	}
-
-	knownVariables := computeKnownVariables(r, p)
-
-	dvsd := unsafe.SliceData(dynamicVariables)
-	p.Pin(dvsd)
-
-	C.frankenphp_register_bulk_variables(&knownVariables[0], dvsd, C.size_t(l), trackVarsArray)
-
-	p.Unpin()
-
-	fc.env = nil
-}
-
 //export go_apache_request_headers
-func go_apache_request_headers(rh, mrh C.uintptr_t) (*C.go_string, C.size_t, C.uintptr_t) {
-	if rh == 0 {
-		// worker mode, not handling a request
-		mr := cgo.Handle(mrh).Value().(*http.Request)
-		mfc := mr.Context().Value(contextKey).(*FrankenPHPContext)
+func go_apache_request_headers(threadIndex C.uintptr_t, hasActiveRequest bool) (*C.go_string, C.size_t) {
+	thread := phpThreads[threadIndex]
 
-		if c := mfc.logger.Check(zap.DebugLevel, "apache_request_headers() called in non-HTTP context"); c != nil {
+	if !hasActiveRequest {
+		// worker mode, not handling a request
+		mfc := thread.mainRequest.Context().Value(contextKey).(*FrankenPHPContext)
+
+		if c := mfc.logger.Check(zapcore.DebugLevel, "apache_request_headers() called in non-HTTP context"); c != nil {
 			c.Write(zap.String("worker", mfc.scriptFilename))
 		}
 
-		return nil, 0, 0
+		return nil, 0
 	}
-	r := cgo.Handle(rh).Value().(*http.Request)
-
-	pinner := &runtime.Pinner{}
-	pinnerHandle := C.uintptr_t(cgo.NewHandle(pinner))
+	r := thread.getActiveRequest()
 
 	headers := make([]C.go_string, 0, len(r.Header)*2)
 
 	for field, val := range r.Header {
 		fd := unsafe.StringData(field)
-		pinner.Pin(fd)
+		thread.Pin(fd)
 
 		cv := strings.Join(val, ", ")
 		vd := unsafe.StringData(cv)
-		pinner.Pin(vd)
+		thread.Pin(vd)
 
 		headers = append(
 			headers,
@@ -646,27 +701,17 @@ func go_apache_request_headers(rh, mrh C.uintptr_t) (*C.go_string, C.size_t, C.u
 	}
 
 	sd := unsafe.SliceData(headers)
-	pinner.Pin(sd)
+	thread.Pin(sd)
 
-	return sd, C.size_t(len(r.Header)), pinnerHandle
-}
-
-//export go_apache_request_cleanup
-func go_apache_request_cleanup(rh C.uintptr_t) {
-	if rh == 0 {
-		return
-	}
-
-	h := cgo.Handle(rh)
-	p := h.Value().(*runtime.Pinner)
-	p.Unpin()
-	h.Delete()
+	return sd, C.size_t(len(r.Header))
 }
 
 func addHeader(fc *FrankenPHPContext, cString *C.char, length C.int) {
 	parts := strings.SplitN(C.GoStringN(cString, length), ": ", 2)
 	if len(parts) != 2 {
-		fc.logger.Debug("invalid header", zap.String("header", parts[0]))
+		if c := fc.logger.Check(zapcore.DebugLevel, "invalid header"); c != nil {
+			c.Write(zap.String("header", parts[0]))
+		}
 
 		return
 	}
@@ -675,8 +720,8 @@ func addHeader(fc *FrankenPHPContext, cString *C.char, length C.int) {
 }
 
 //export go_write_headers
-func go_write_headers(rh C.uintptr_t, status C.int, headers *C.zend_llist) {
-	r := cgo.Handle(rh).Value().(*http.Request)
+func go_write_headers(threadIndex C.uintptr_t, status C.int, headers *C.zend_llist) {
+	r := phpThreads[threadIndex].getActiveRequest()
 	fc := r.Context().Value(contextKey).(*FrankenPHPContext)
 
 	if fc.responseWriter == nil {
@@ -703,8 +748,8 @@ func go_write_headers(rh C.uintptr_t, status C.int, headers *C.zend_llist) {
 }
 
 //export go_sapi_flush
-func go_sapi_flush(rh C.uintptr_t) bool {
-	r := cgo.Handle(rh).Value().(*http.Request)
+func go_sapi_flush(threadIndex C.uintptr_t) bool {
+	r := phpThreads[threadIndex].getActiveRequest()
 	fc := r.Context().Value(contextKey).(*FrankenPHPContext)
 
 	if fc.responseWriter == nil || clientHasClosed(r) {
@@ -712,15 +757,17 @@ func go_sapi_flush(rh C.uintptr_t) bool {
 	}
 
 	if err := http.NewResponseController(fc.responseWriter).Flush(); err != nil {
-		fc.logger.Error("the current responseWriter is not a flusher", zap.Error(err))
+		if c := fc.logger.Check(zapcore.ErrorLevel, "the current responseWriter is not a flusher"); c != nil {
+			c.Write(zap.Error(err))
+		}
 	}
 
 	return false
 }
 
 //export go_read_post
-func go_read_post(rh C.uintptr_t, cBuf *C.char, countBytes C.size_t) (readBytes C.size_t) {
-	r := cgo.Handle(rh).Value().(*http.Request)
+func go_read_post(threadIndex C.uintptr_t, cBuf *C.char, countBytes C.size_t) (readBytes C.size_t) {
+	r := phpThreads[threadIndex].getActiveRequest()
 
 	p := unsafe.Slice((*byte)(unsafe.Pointer(cBuf)), countBytes)
 	var err error
@@ -734,8 +781,8 @@ func go_read_post(rh C.uintptr_t, cBuf *C.char, countBytes C.size_t) (readBytes 
 }
 
 //export go_read_cookies
-func go_read_cookies(rh C.uintptr_t) *C.char {
-	r := cgo.Handle(rh).Value().(*http.Request)
+func go_read_cookies(threadIndex C.uintptr_t) *C.char {
+	r := phpThreads[threadIndex].getActiveRequest()
 
 	cookies := r.Cookies()
 	if len(cookies) == 0 {
@@ -764,16 +811,24 @@ func go_log(message *C.char, level C.int) {
 
 	switch le {
 	case emerg, alert, crit, err:
-		l.Error(m, zap.Stringer("syslog_level", syslogLevel(level)))
+		if c := l.Check(zapcore.ErrorLevel, m); c != nil {
+			c.Write(zap.Stringer("syslog_level", syslogLevel(level)))
+		}
 
 	case warning:
-		l.Warn(m, zap.Stringer("syslog_level", syslogLevel(level)))
+		if c := l.Check(zapcore.WarnLevel, m); c != nil {
+			c.Write(zap.Stringer("syslog_level", syslogLevel(level)))
+		}
 
 	case debug:
-		l.Debug(m, zap.Stringer("syslog_level", syslogLevel(level)))
+		if c := l.Check(zapcore.DebugLevel, m); c != nil {
+			c.Write(zap.Stringer("syslog_level", syslogLevel(level)))
+		}
 
 	default:
-		l.Info(m, zap.Stringer("syslog_level", syslogLevel(level)))
+		if c := l.Check(zapcore.InfoLevel, m); c != nil {
+			c.Write(zap.Stringer("syslog_level", syslogLevel(level)))
+		}
 	}
 }
 
@@ -802,4 +857,36 @@ func freeArgs(argv []*C.char) {
 	for _, arg := range argv {
 		C.free(unsafe.Pointer(arg))
 	}
+}
+
+func executePHPFunction(functionName string) {
+	cFunctionName := C.CString(functionName)
+	defer C.free(unsafe.Pointer(cFunctionName))
+
+	success := C.frankenphp_execute_php_function(cFunctionName)
+
+	if success == 1 {
+		if c := logger.Check(zapcore.DebugLevel, "php function call successful"); c != nil {
+			c.Write(zap.String("function", functionName))
+		}
+	} else {
+		if c := logger.Check(zapcore.ErrorLevel, "php function call failed"); c != nil {
+			c.Write(zap.String("function", functionName))
+		}
+	}
+}
+
+// Ensure that the request path does not contain null bytes
+func requestIsValid(r *http.Request, rw http.ResponseWriter) bool {
+	if !strings.Contains(r.URL.Path, "\x00") {
+		return true
+	}
+	rejectRequest(rw, "Invalid request path")
+	return false
+}
+
+func rejectRequest(rw http.ResponseWriter, message string) {
+	rw.WriteHeader(http.StatusBadRequest)
+	_, _ = rw.Write([]byte(message))
+	rw.(http.Flusher).Flush()
 }

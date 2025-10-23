@@ -29,23 +29,32 @@ Rendez-vous sur `https://localhost`, c'est parti !
 > [!TIP]
 >
 > Ne tentez pas d'utiliser `https://127.0.0.1`. Utilisez `https://localhost` et acceptez le certificat auto-signé.
-> Utilisez [la variable d'environnement `SERVER_NAME`](config.md#environment-variables) pour changer le domaine à utiliser.
+> Utilisez [la variable d'environnement `SERVER_NAME`](config.md#variables-denvironnement) pour changer le domaine à utiliser.
 
 ### Binaire autonome
 
 Si vous préférez ne pas utiliser Docker, nous fournissons des binaires autonomes de FrankenPHP pour Linux et macOS
-contenant [PHP 8.3](https://www.php.net/releases/8.3/fr.php) et la plupart des extensions PHP populaires : [Télécharger FrankenPHP](https://github.com/dunglas/frankenphp/releases)
+contenant [PHP 8.3](https://www.php.net/releases/8.3/fr.php) et la plupart des extensions PHP populaires.
+
+Sous Windows, utilisez [WSL](https://learn.microsoft.com/windows/wsl/) pour exécuter FrankenPHP.
+
+[Téléchargez FrankenPHP](https://github.com/dunglas/frankenphp/releases) ou copiez cette ligne dans votre terminal pour installer automatiquement la version appropriée à votre plateforme :
+
+```console
+curl https://frankenphp.dev/install.sh | sh
+mv frankenphp /usr/local/bin/
+```
 
 Pour servir le contenu du répertoire courant, exécutez :
 
 ```console
-./frankenphp php-server
+frankenphp php-server
 ```
 
 Vous pouvez également exécuter des scripts en ligne de commande avec :
 
 ```console
-./frankenphp php-cli /path/to/your/script.php
+frankenphp php-cli /path/to/your/script.php
 ```
 
 ## Documentation
@@ -56,6 +65,7 @@ Vous pouvez également exécuter des scripts en ligne de commande avec :
 * [Configuration](config.md)
 * [Images Docker](docker.md)
 * [Déploiement en production](production.md)
+* [Optimisation des performances](performance.md)
 * [Créer des applications PHP **standalone**, auto-exécutables](embed.md)
 * [Créer un build statique](static.md)
 * [Compiler depuis les sources](compile.md)

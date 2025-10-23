@@ -31,11 +31,11 @@ FROM dunglas/frankenphp
 
 # ajoutez des extensions supplémentaires ici :
 RUN install-php-extensions \
- pdo_mysql \
- gd \
- intl \
- zip \
- opcache
+	pdo_mysql \
+	gd \
+	intl \
+	zip \
+	opcache
 ```
 
 ## Comment installer plus de modules Caddy
@@ -45,7 +45,7 @@ FrankenPHP est construit sur Caddy, et tous les [modules Caddy](https://caddyser
 La manière la plus simple d'installer des modules Caddy personnalisés est d'utiliser [xcaddy](https://github.com/caddyserver/xcaddy):
 
 ```dockerfile
-FROM dunglas/frankenphp:latest-builder AS builder
+FROM dunglas/frankenphp:builder AS builder
 
 # Copier xcaddy dans l'image du constructeur
 COPY --from=caddy:builder /usr/bin/xcaddy /usr/bin/xcaddy
@@ -56,6 +56,7 @@ RUN xcaddy build \
 	--output /usr/local/bin/frankenphp \
 	--with github.com/dunglas/frankenphp=./ \
 	--with github.com/dunglas/frankenphp/caddy=./caddy/ \
+  --with github.com/dunglas/caddy-cbrotli \
 	# Mercure et Vulcain sont inclus dans la construction officielle, mais n'hésitez pas à les retirer
 	--with github.com/dunglas/mercure/caddy \
 	--with github.com/dunglas/vulcain/caddy
@@ -73,7 +74,7 @@ L'image builder fournie par FrankenPHP contient une version compilée de `libphp
 > [!TIP]
 >
 > Si vous utilisez Alpine Linux et Symfony,
-> vous devrez peut-être [augmenter la taille de pile par défaut](compile.md#using-xcaddy).
+> vous devrez peut-être [augmenter la taille de pile par défaut](compile.md#utiliser-xcaddy).
 
 ## Activer le mode Worker par défaut
 
@@ -95,7 +96,7 @@ Pour développer facilement avec FrankenPHP, montez le répertoire de l'hôte co
 docker run -v $PWD:/app/public -p 80:80 -p 443:443 -p 443:443/udp --tty my-php-app
 ```
 
-> ![TIP]
+> [!TIP]
 >
 > L'option --tty permet d'avoir des logs lisibles par un humain au lieu de logs JSON.
 
@@ -140,12 +141,12 @@ FROM dunglas/frankenphp
 ARG USER=www-data
 
 RUN \
- # Utilisez "adduser -D ${USER}" pour les distributions basées sur Alpine
- useradd -D ${USER}; \
- # Ajouter la capacité supplémentaire de se lier aux ports 80 et 443
- setcap CAP_NET_BIND_SERVICE=+eip /usr/local/bin/frankenphp; \
- # Donner l'accès en écriture à /data/caddy et /config/caddy
- chown -R ${USER}:${USER} /data/caddy && chown -R ${USER}:${USER} /config/caddy
+	# Utilisez "adduser -D ${USER}" pour les distributions basées sur Alpine
+	useradd -D ${USER}; \
+	# Ajouter la capacité supplémentaire de se lier aux ports 80 et 443
+	setcap CAP_NET_BIND_SERVICE=+eip /usr/local/bin/frankenphp; \
+	# Donner l'accès en écriture à /data/caddy et /config/caddy
+	chown -R ${USER}:${USER} /data/caddy && chown -R ${USER}:${USER} /config/caddy
 
 USER ${USER}
 ```
