@@ -583,15 +583,8 @@ func go_register_variables(rh C.uintptr_t, trackVarsArray *C.zval) {
 		l++
 	}
 
+	// 与官方 addPreparedEnvToServer 一致：注册全部 prepared env，在后一轮 php_register_variable_safe 中覆盖已知 CGI 变量。
 	for k, v := range fc.env {
-		if _, ok := knownServerKeys[k]; ok {
-			fmt.Printf("in knownServerKeys\n")
-		}
-		
-		if _, ok := knownServerKeys[k]; ok {
-			continue
-		}
-
 		kData := unsafe.StringData(k)
 		vData := unsafe.Pointer(unsafe.StringData(v))
 

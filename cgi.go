@@ -36,28 +36,6 @@ const (
 	sslProtocol
 )
 
-var knownServerKeys = map[string]struct{}{
-	"CONTENT_LENGTH\x00":    {},
-	"DOCUMENT_ROOT\x00":     {},
-	"DOCUMENT_URI\x00":      {},
-	"GATEWAY_INTERFACE\x00": {},
-	"HTTP_HOST\x00":         {},
-	"HTTPS\x00":             {},
-	"PATH_INFO\x00":         {},
-	"PHP_SELF\x00":          {},
-	"REMOTE_ADDR\x00":       {},
-	"REMOTE_HOST\x00":       {},
-	"REMOTE_PORT\x00":       {},
-	"REQUEST_SCHEME\x00":    {},
-	"SCRIPT_FILENAME\x00":   {},
-	"SCRIPT_NAME\x00":       {},
-	"SERVER_NAME\x00":       {},
-	"SERVER_PORT\x00":       {},
-	"SERVER_PROTOCOL\x00":   {},
-	"SERVER_SOFTWARE\x00":   {},
-	"SSL_PROTOCOL\x00":      {},
-}
-
 func setKnownServerVariable(p *runtime.Pinner, cArr *[27]C.go_string, serverKey serverKey, val string) {
 	if val == "" {
 		return
